@@ -1,0 +1,11 @@
+docs/
+reports/
+.claude
+codex-pin/
+.env
+results/
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
