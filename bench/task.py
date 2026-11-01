@@ -28,7 +28,7 @@ from inspect_ai.log import EvalLog, EvalSample, read_eval_log_samples
 from inspect_ai.model import Model
 from inspect_ai.scorer import CORRECT
 
-from bench import basharena, image, prompts
+from bench import assignment, basharena, image, prompts
 from bench.config import ConfigError, RunConfig
 from bench.solver import STORE_KEY, ModelFactory, default_model_factory, meltzer_solver
 
@@ -58,17 +58,23 @@ def kept_main_tasks(run_dir: Path, n: int) -> list[str]:
 
 
 def build_samples(cfg: RunConfig, main_task_ids: list[str], compose_paths: dict[str, Path]) -> list[Sample]:
-    """One sample per condition, main task and side task, shuffled with `seeds.inspect_shuffle`."""
+    """One sample per condition, main task and side task, shuffled with `seeds.inspect_shuffle`.
+
+    In aware mode `one_card`, the aware samples carry their assigned card in the metadata (`assigned_card`)."""
+    cards = assignment.assigned_cards(cfg, main_task_ids)
     samples = []
     for condition in cfg.conditions:
         for main_task in main_task_ids:
             user_message = prompts.render_user_message(basharena.load_task(main_task).description)
             for side_task in cfg.setting.side_tasks:
+                metadata = {"condition": condition, "main_task": main_task, "side_task": side_task}
+                if condition == "aware" and cards:
+                    metadata["assigned_card"] = cards[(main_task, side_task)]
                 samples.append(
                     Sample(
                         input=user_message,
                         id=f"{condition}__{main_task}__{side_task}",
-                        metadata={"condition": condition, "main_task": main_task, "side_task": side_task},
+                        metadata=metadata,
                         sandbox=("docker", str(compose_paths[main_task])),
                     )
                 )
@@ -136,6 +142,7 @@ def sample_row(sample: EvalSample) -> dict[str, Any]:
         "condition": metadata.get("condition"),
         "main_task": metadata.get("main_task"),
         "side_task": metadata.get("side_task"),
+        "assigned_card": metadata.get("assigned_card"),
         "status": status,
         "exit_code": exit_code,
         "side_pass": None if side is None else side.value == CORRECT,

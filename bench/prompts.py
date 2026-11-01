@@ -29,12 +29,35 @@ def render_user_message(task_description: str) -> str:
     return "Your task is as follows:\n" + task_description
 
 
-def render_cards(cards_dir: Path) -> str:
-    """The card files E01, E02, ... in id order, full text, each preceded by `## Card <id>`."""
+def card_files(cards_dir: Path) -> list[tuple[str, Path]]:
+    """(id, path) of the card files `E01-<slug>.md`, `E02-...`, in id order."""
     files = sorted(Path(cards_dir).glob("E[0-9][0-9]-*.md"), key=lambda f: f.name[:3])
     if not files:
         raise ValueError(f"no card files in {cards_dir}")
-    return "\n\n".join(f"## Card {f.name[:3]}\n\n{_read(f)}" for f in files)
+    return [(f.name[:3], f) for f in files]
+
+
+def card_ids(cards_dir: Path) -> list[str]:
+    return [card_id for card_id, _ in card_files(cards_dir)]
+
+
+def card_body(text: str) -> str:
+    """The card text without its leading YAML block (`---` ... `---`), with its `##` headings as `###`."""
+    if text.startswith("---\n"):
+        end = text.find("\n---\n", 4)
+        if end != -1:
+            text = text[end + len("\n---\n"):]
+    return re.sub(r"(?m)^## ", "### ", text).strip()
+
+
+def render_cards(cards_dir: Path, card_id: str | None = None) -> str:
+    """The cards in id order (only `card_id` if given), each as `## Card <id>` and its body (`card_body`)."""
+    files = card_files(cards_dir)
+    if card_id is not None:
+        files = [(cid, path) for cid, path in files if cid == card_id]
+        if not files:
+            raise ValueError(f"no card {card_id} in {cards_dir}")
+    return "\n\n".join(f"## Card {cid}\n\n{card_body(_read(path))}" for cid, path in files)
 
 
 def render_developer_instructions(
@@ -45,8 +68,10 @@ def render_developer_instructions(
     attack_base_path: Path,
     aware_section_path: Path,
     cards_dir: Path,
+    card_id: str | None = None,
 ) -> str:
-    """Hidden system-prompt text. unaware: attack_base. aware: attack_base + aware_section."""
+    """Hidden system-prompt text. unaware: attack_base. aware: attack_base + aware_section, with every card
+    or, if `card_id` is given, only that card."""
     if condition not in CONDITIONS:
         raise ValueError(f"unknown condition {condition!r}, expected one of {CONDITIONS}")
     text = _fill(
@@ -57,7 +82,7 @@ def render_developer_instructions(
         },
     )
     if condition == "aware":
-        text += "\n\n" + _fill(_read(aware_section_path), {"cards": render_cards(cards_dir)})
+        text += "\n\n" + _fill(_read(aware_section_path), {"cards": render_cards(cards_dir, card_id)})
     return text
 
 
@@ -71,6 +96,7 @@ class ReviewSample:
     attack_base_path: Path
     aware_section_path: Path
     cards_dir: Path
+    card_id: str | None = None
 
 
 def write_review_prompts(out_dir: Path, samples: Mapping[str, ReviewSample]) -> list[Path]:
@@ -98,6 +124,7 @@ def write_review_prompts(out_dir: Path, samples: Mapping[str, ReviewSample]) -> 
                 attack_base_path=s.attack_base_path,
                 aware_section_path=s.aware_section_path,
                 cards_dir=s.cards_dir,
+                card_id=s.card_id,
             ),
         }
         for name, text in files.items():

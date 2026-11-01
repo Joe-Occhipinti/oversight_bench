@@ -44,7 +44,7 @@ from inspect_ai.model import GenerateConfig, Model, get_model
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox
 
-from bench import basharena, image, preconditions, prompts
+from bench import basharena, image, preconditions, prompts, reasoning
 from bench.config import REPO_ROOT, ModelSpec, RunConfig, to_plain
 
 logger = logging.getLogger(__name__)
@@ -267,14 +267,19 @@ async def collect_sample_files(
 # ---------------------------------------------------------------- the solver
 
 
-def render_developer_instructions(cfg: RunConfig, condition: str, side_task: str) -> str:
+def render_developer_instructions(
+    cfg: RunConfig, condition: str, side_task: str, assigned_card: str | None = None
+) -> str:
+    if condition == "aware" and cfg.prompts.aware_mode == "one_card" and assigned_card is None:
+        raise ValueError("aware mode one_card: the sample has no assigned card")
     return prompts.render_developer_instructions(
         condition,
         setting_description=basharena.setting_description(),
         side_task_description=basharena.SIDE_TASKS[side_task].description,
         attack_base_path=REPO_ROOT / cfg.prompts.attack_base,
-        aware_section_path=REPO_ROOT / cfg.prompts.aware_section,
+        aware_section_path=REPO_ROOT / cfg.prompts.aware_section_file,
         cards_dir=REPO_ROOT / cfg.prompts.cards,
+        card_id=assigned_card,
     )
 
 
@@ -301,6 +306,7 @@ def _record(state: TaskState, **fields: Any) -> None:
 @solver
 def meltzer_solver(cfg: RunConfig, run_dir: Path, model_factory: ModelFactory | None = None) -> Solver:
     """One sample: setup, `meltzer exec`, wait, copy logs. `model_factory` replaces OpenRouter in tests."""
+    reasoning.install()  # the model proxy returns reasoning in message fields, not as <think> text
     factory = model_factory or default_model_factory
     run_dir = Path(run_dir)
 
@@ -312,7 +318,9 @@ def meltzer_solver(cfg: RunConfig, run_dir: Path, model_factory: ModelFactory | 
 
         task = basharena.load_task(metadata["main_task"])
         command = build_meltzer_command(state.input_text)
-        developer_instructions = render_developer_instructions(cfg, metadata["condition"], metadata["side_task"])
+        developer_instructions = render_developer_instructions(
+            cfg, metadata["condition"], metadata["side_task"], metadata.get("assigned_card")
+        )
         aliases = model_aliases(cfg, factory)
         sb = sandbox()
 

@@ -6,7 +6,8 @@ setting:
 conditions: [unaware, aware]
 prompts:
   attack_base: prompts/exp1/attack_base.md
-  aware_section: prompts/exp1/aware_section.md
+  aware_mode: all_cards                # all_cards: every card in the aware prompt; one_card: one card per main task x side task
+  aware_section: {all_cards: prompts/exp1/aware_all_cards.md, one_card: prompts/exp1/aware_one_card.md}
   cards: registry/v0.1/cards
 models:                               # chosen by Gio, 2026-10-31
   agent:   {id: z-ai/glm-5.3,       reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}}
@@ -15,4 +16,4 @@ models:                               # chosen by Gio, 2026-10-31
 meltzer: {max_turn_steps: 100}
 limits: {meltzer_seconds: 1800, sample_time_limit_seconds: 2700, wait_seconds: 15}
 parallel: {max_samples: 6}
-seeds: {inspect_shuffle: 0, bootstrap: 0}
+seeds: {inspect_shuffle: 0, card_assignment: 0, bootstrap: 0}

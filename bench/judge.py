@@ -1,4 +1,4 @@
-"""Strategy judge (spec 10.3): did a successful attack follow one of the 14 exploit cards?
+"""Strategy judge (spec 10.3): did a successful attack follow one of the exploit cards?
 
 One call per sample with side_pass true, made directly to OpenRouter with httpx. Entry point:
 judge_run(run_dir, judge, cards_dir). Per sample it writes samples/<id>/judge.json and then rewrites
@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,8 @@ from typing import Any
 
 import httpx
 import yaml
+
+from bench import prompts
 
 BENCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCH_DIR.parent
@@ -33,7 +36,6 @@ RETRYABLE_STATUS = {408, 429}
 TIMEOUT_S = 300.0
 
 TRUNCATE_CHARS = 4000  # per tool result and per tool argument value in the transcript
-CARD_IDS = tuple(f"E{i:02d}" for i in range(1, 15))
 OUTPUT_KEYS = ("faithful", "card_id", "route_summary", "rationale")
 JUDGE_KEYS = ("id", "provider", "temperature", "concurrency")  # reasoning_effort may be null
 
@@ -50,16 +52,13 @@ class JudgeFatalError(RuntimeError):
 
 
 def load_cards(cards_dir: Path) -> list[tuple[str, str]]:
-    """The 14 cards (id, full text with front matter) in id order. Files are named `E07-<slug>.md`."""
-    found: dict[str, str] = {}
-    for path in sorted(Path(cards_dir).glob("*.md")):
-        match = re.match(r"(E\d{2})(?!\d)", path.name)
-        if match:
-            found[match.group(1)] = path.read_text(encoding="utf-8")
-    missing = [cid for cid in CARD_IDS if cid not in found]
-    if missing:
-        raise JudgeFatalError(f"cards missing in {cards_dir}: {missing}")
-    return [(cid, found[cid]) for cid in CARD_IDS]
+    """The cards (id, text) of the folder in id order. Files are named `E07-<slug>.md`. The text is the one
+    in the agent's prompt (`prompts.card_body`): without the YAML header."""
+    try:
+        files = prompts.card_files(cards_dir)
+    except ValueError as e:
+        raise JudgeFatalError(str(e)) from None
+    return [(card_id, prompts.card_body(path.read_text(encoding="utf-8"))) for card_id, path in files]
 
 
 def load_prompt(path: Path = PROMPT_PATH) -> dict:
@@ -312,7 +311,7 @@ def render_transcript(session_files: list[Path]) -> str:
 FENCE = re.compile(r"```(?:json)?\s*\n(.*?)\n\s*```", re.S)
 
 
-def _validate(data: Any) -> dict:
+def _validate(data: Any, card_ids: Sequence[str]) -> dict:
     if not isinstance(data, dict):
         raise JudgeOutputError("output is not a JSON object")
     missing = [k for k in OUTPUT_KEYS if k not in data]
@@ -324,8 +323,8 @@ def _validate(data: Any) -> dict:
     for key in ("route_summary", "rationale"):
         if not isinstance(data[key], str) or not data[key].strip():
             raise JudgeOutputError(f"missing or empty string {key!r}")
-    if card_id is not None and (not isinstance(card_id, str) or card_id not in CARD_IDS):
-        raise JudgeOutputError(f"card_id must be one of E01..E14 or null, got {card_id!r}")
+    if card_id is not None and (not isinstance(card_id, str) or card_id not in card_ids):
+        raise JudgeOutputError(f"card_id must be one of {', '.join(card_ids)} or null, got {card_id!r}")
     if faithful and card_id is None:
         raise JudgeOutputError("faithful is true but card_id is null")
     if not faithful and card_id is not None:
@@ -338,15 +337,15 @@ def _validate(data: Any) -> dict:
     }
 
 
-def parse_judge_output(text: str) -> dict:
-    """Parse and validate one judge output. Raises JudgeOutputError."""
+def parse_judge_output(text: str, card_ids: Sequence[str]) -> dict:
+    """Parse and validate one judge output; `card_ids` are the cards it may name. Raises JudgeOutputError."""
     fenced = FENCE.search(text or "")
     raw = fenced.group(1) if fenced else (text or "")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         raise JudgeOutputError(f"invalid JSON: {e}") from None
-    return _validate(data)
+    return _validate(data, card_ids)
 
 
 # --- API key ------------------------------------------------------------------------------------
@@ -414,8 +413,11 @@ class SampleJob:
 
 
 class Caller:
-    def __init__(self, client: httpx.AsyncClient, api_key: str, concurrency: int, backoff_s: float):
+    def __init__(
+        self, client: httpx.AsyncClient, api_key: str, concurrency: int, backoff_s: float, card_ids: Sequence[str]
+    ):
         self.client = client
+        self.card_ids = card_ids
         self.headers = {"Authorization": f"Bearer {api_key}"}
         self.sem = asyncio.Semaphore(concurrency)
         self.backoff_s = backoff_s
@@ -502,7 +504,7 @@ class Caller:
             data, record = got
             content = (data["choices"][0].get("message") or {}).get("content")
             try:
-                record["parsed"] = parse_judge_output(content)
+                record["parsed"] = parse_judge_output(content, self.card_ids)
             except JudgeOutputError as e:
                 record["error"] = f"output: {e}"
                 job.error = f"output: {e}"
@@ -516,9 +518,11 @@ def _write_judge_json(job: SampleJob) -> None:
     (job.sample_dir / "judge.json").write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-async def _run_jobs(jobs: list[SampleJob], judge: dict, api_key: str, transport, backoff_s: float) -> None:
+async def _run_jobs(
+    jobs: list[SampleJob], judge: dict, api_key: str, transport, backoff_s: float, card_ids: Sequence[str]
+) -> None:
     async with httpx.AsyncClient(transport=transport) as client:
-        caller = Caller(client, api_key, int(judge["concurrency"]), backoff_s)
+        caller = Caller(client, api_key, int(judge["concurrency"]), backoff_s, card_ids)
         await asyncio.gather(*(caller.judge(j) for j in jobs))
     if caller.fatal is not None:
         raise caller.fatal
@@ -537,11 +541,11 @@ def write_rows(path: Path, rows: list[dict]) -> None:
     os.replace(tmp, path)
 
 
-def valid_judgment(sample_dir: Path) -> dict | None:
+def valid_judgment(sample_dir: Path, card_ids: Sequence[str]) -> dict | None:
     """The parsed output of samples/<id>/judge.json if the file exists and its output is valid."""
     path = sample_dir / "judge.json"
     try:
-        return _validate(json.loads(path.read_text(encoding="utf-8"))["parsed"])
+        return _validate(json.loads(path.read_text(encoding="utf-8"))["parsed"], card_ids)
     except (OSError, ValueError, KeyError, TypeError):
         return None
 
@@ -588,6 +592,7 @@ def judge_run(
     if missing:
         raise ValueError(f"judge config misses keys: {missing}")
     cards = load_cards(Path(cards_dir))
+    card_ids = [card_id for card_id, _ in cards]
     prompt = load_prompt()
     if side_task_descriptions is None:
         side_task_descriptions = _lazy_side_task_descriptions()
@@ -598,7 +603,7 @@ def judge_run(
     n_done = n_nologs = 0
     for r in passed:
         sample_dir = run_dir / "samples" / r["sample_id"]
-        if valid_judgment(sample_dir) is not None:
+        if valid_judgment(sample_dir, card_ids) is not None:
             n_done += 1
             continue
         files = session_files(sample_dir)
@@ -627,11 +632,13 @@ def judge_run(
             key = api_key or load_api_key()
             if not key:
                 raise JudgeFatalError(f"{KEY_NAME} not set (environment or {ENV_FILE})")
-            asyncio.run(_run_jobs(jobs, judge, key, transport, backoff_s))
+            asyncio.run(_run_jobs(jobs, judge, key, transport, backoff_s, card_ids))
     finally:
         # Fill the judge field from the valid judge.json files, also after a fatal error.
         for r in rows:
-            r["judge"] = valid_judgment(run_dir / "samples" / r["sample_id"]) if r.get("side_pass") is True else None
+            r["judge"] = (
+                valid_judgment(run_dir / "samples" / r["sample_id"], card_ids) if r.get("side_pass") is True else None
+            )
         write_rows(run_dir / "samples.jsonl", rows)
 
     n_ok = sum(j.parsed is not None for j in jobs)

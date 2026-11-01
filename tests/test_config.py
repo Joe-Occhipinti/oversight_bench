@@ -27,7 +27,12 @@ BASE = {
         "main_tasks": {"pool": "no_cover", "n": 30, "seed": 0},
     },
     "conditions": ["unaware", "aware"],
-    "prompts": {"attack_base": "a.md", "aware_section": "b.md", "cards": "cards"},
+    "prompts": {
+        "attack_base": "a.md",
+        "aware_mode": "all_cards",
+        "aware_section": {"all_cards": "b.md", "one_card": "c.md"},
+        "cards": "cards",
+    },
     "models": {
         "agent": {
             "id": "a/agent",
@@ -50,7 +55,7 @@ BASE = {
     "meltzer": {"max_turn_steps": 100},
     "limits": {"meltzer_seconds": 1800, "sample_time_limit_seconds": 2700, "wait_seconds": 15},
     "parallel": {"max_samples": 6},
-    "seeds": {"inspect_shuffle": 0, "bootstrap": 0},
+    "seeds": {"inspect_shuffle": 0, "card_assignment": 0, "bootstrap": 0},
 }
 
 
@@ -101,9 +106,13 @@ def test_exp1_01_yaml_loads_with_section_12_values():
     assert cfg.conditions == ("unaware", "aware")
     assert cfg.prompts == config.Prompts(
         attack_base="prompts/exp1/attack_base.md",
-        aware_section="prompts/exp1/aware_section.md",
+        aware_mode="all_cards",
+        aware_section=config.AwareSections(
+            all_cards="prompts/exp1/aware_all_cards.md", one_card="prompts/exp1/aware_one_card.md"
+        ),
         cards="registry/v0.1/cards",
     )
+    assert cfg.prompts.aware_section_file == "prompts/exp1/aware_all_cards.md"
     wafer = config.Provider(order=("wafer",), allow_fallbacks=False)
     assert cfg.models.agent == config.ModelSpec(id="z-ai/glm-5.3", reasoning_effort="high", provider=wafer)
     assert cfg.models.monitor == config.ModelSpec(id="z-ai/glm-5.3-flash", reasoning_effort="low", provider=wafer)
@@ -117,7 +126,7 @@ def test_exp1_01_yaml_loads_with_section_12_values():
     assert cfg.meltzer == config.Meltzer(max_turn_steps=100)
     assert cfg.limits == config.Limits(meltzer_seconds=1800, sample_time_limit_seconds=2700, wait_seconds=15)
     assert cfg.parallel == config.Parallel(max_samples=6)
-    assert cfg.seeds == config.Seeds(inspect_shuffle=0, bootstrap=0)
+    assert cfg.seeds == config.Seeds(inspect_shuffle=0, card_assignment=0, bootstrap=0)
 
 
 def test_pilot_yaml_differs_from_exp1_01_only_in_run_id_and_n():
@@ -325,6 +334,7 @@ def test_conditions_must_be_nonempty_list_without_duplicates(tmp_path, bad):
         "setting",
         "setting.main_tasks",
         "prompts",
+        "prompts.aware_section",
         "models",
         "models.agent",
         "models.monitor",
@@ -393,6 +403,10 @@ def test_pool_must_be_no_cover(tmp_path, bad):
         ("parallel.max_samples", 0),
         ("seeds.bootstrap", "0"),
         ("seeds.inspect_shuffle", 1.0),
+        ("seeds.card_assignment", "0"),
+        ("prompts.aware_mode", "both"),
+        ("prompts.aware_mode", 1),
+        ("prompts.aware_section.one_card", ""),
         ("setting.main_tasks.seed", True),
         ("prompts.cards", ""),
         ("setting.name", ""),
@@ -595,7 +609,7 @@ def test_manifest_fields_known_at_start(tmp_path, cfg_and_path):
     assert m["meltzer_tree_hash"] == config.meltzer_tree_hash()
     assert m["image_tag"] == config.image_tag(m["meltzer_tree_hash"])
     assert m["inspect_ai_version"] == importlib.metadata.version("inspect_ai")
-    assert m["seeds"] == {"main_tasks": 0, "inspect_shuffle": 0, "bootstrap": 0}
+    assert m["seeds"] == {"main_tasks": 0, "inspect_shuffle": 0, "card_assignment": 0, "bootstrap": 0}
     assert datetime.fromisoformat(m["start_time"]).tzinfo is not None
     assert m["end_time"] is None
     assert m["main_task_ids"] is None
@@ -607,12 +621,13 @@ def test_manifest_fields_known_at_start(tmp_path, cfg_and_path):
 def test_manifest_seeds_come_from_config(tmp_path):
     data = mutated("seeds.bootstrap", 7)
     data["seeds"]["inspect_shuffle"] = 3
+    data["seeds"]["card_assignment"] = 4
     data["setting"]["main_tasks"]["seed"] = 5
     path = write_cfg(tmp_path, data)
     cfg = load_config(path)
     run_dir = config.create_run_dir(cfg, path, results_root=tmp_path / "results")
     m = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert m["seeds"] == {"main_tasks": 5, "inspect_shuffle": 3, "bootstrap": 7}
+    assert m["seeds"] == {"main_tasks": 5, "inspect_shuffle": 3, "card_assignment": 4, "bootstrap": 7}
 
 
 def test_finish_manifest_fills_end_time_and_main_task_ids(tmp_path, cfg_and_path):
@@ -731,3 +746,19 @@ def test_sha256_helper_matches_manual_hash(tmp_path):
     for rel, data in (("d/f", b"F"), ("g", b"G")):
         h.update(rel.encode() + b"\0" + data + b"\0")
     assert config.meltzer_tree_hash(root) == h.hexdigest()
+
+
+# ---------------------------------------------------------------- aware mode
+
+
+def test_aware_mode_selects_the_section_file(tmp_path):
+    for mode, file in (("all_cards", "b.md"), ("one_card", "c.md")):
+        cfg = load(tmp_path, mutated("prompts.aware_mode", mode))
+        assert cfg.prompts.aware_mode == mode and cfg.prompts.aware_section_file == file
+
+
+@pytest.mark.parametrize("path", ["prompts.aware_mode", "prompts.aware_section", "prompts.aware_section.all_cards",
+                                  "prompts.aware_section.one_card", "seeds.card_assignment"])
+def test_aware_mode_fields_are_required(tmp_path, path):
+    with pytest.raises(ConfigError, match=re.escape(path)):
+        load(tmp_path, mutated(path))

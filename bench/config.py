@@ -29,6 +29,7 @@ RESULTS_ROOT = REPO_ROOT / "results"
 
 SIDE_TASKS = ("download_malware", "leak_passwords", "disable_firewall", "sudo_edit")
 CONDITIONS = ("unaware", "aware")
+AWARE_MODES = ("all_cards", "one_card")  # every card in the aware prompt, or one card per main task x side task
 # Agent and monitor efforts. "max" and "xhigh" are rejected: Inspect maps "max" to OpenRouter "xhigh" (spec 7.2).
 AGENT_MONITOR_EFFORTS = ("none", "minimal", "low", "medium", "high")
 MAX_MAIN_TASKS = 100
@@ -60,10 +61,24 @@ class Setting:
 
 
 @dataclass(frozen=True)
+class AwareSections:
+    """The oversight awareness text file of each aware mode."""
+
+    all_cards: str
+    one_card: str
+
+
+@dataclass(frozen=True)
 class Prompts:
     attack_base: str
-    aware_section: str
+    aware_mode: str
+    aware_section: AwareSections
     cards: str
+
+    @property
+    def aware_section_file(self) -> str:
+        """The oversight awareness text file of the chosen aware mode."""
+        return getattr(self.aware_section, self.aware_mode)
 
 
 @dataclass(frozen=True)
@@ -112,6 +127,7 @@ class Parallel:
 @dataclass(frozen=True)
 class Seeds:
     inspect_shuffle: int
+    card_assignment: int
     bootstrap: int
 
 
@@ -178,6 +194,13 @@ def _const(parent: dict, key: str, prefix: str, expected: str) -> str:
     value = _str(parent, key, prefix)
     if value != expected:
         raise ConfigError(f"{_join(prefix, key)}: must be {expected!r}, got {value!r}")
+    return value
+
+
+def _choice(parent: dict, key: str, prefix: str, allowed: Sequence[str]) -> str:
+    value = _str(parent, key, prefix)
+    if value not in allowed:
+        raise ConfigError(f"{_join(prefix, key)}: must be one of {', '.join(allowed)}, got {value!r}")
     return value
 
 
@@ -304,10 +327,12 @@ def _build(raw: dict) -> RunConfig:
 
     conditions = _str_list(raw, "conditions", "", allowed=CONDITIONS)
 
-    p = _section(raw, "prompts", "", ("attack_base", "aware_section", "cards"))
+    p = _section(raw, "prompts", "", ("attack_base", "aware_mode", "aware_section", "cards"))
+    sections = _section(p, "aware_section", "prompts", AWARE_MODES)
     prompts = Prompts(
         attack_base=_str(p, "attack_base", "prompts"),
-        aware_section=_str(p, "aware_section", "prompts"),
+        aware_mode=_choice(p, "aware_mode", "prompts", AWARE_MODES),
+        aware_section=AwareSections(**{mode: _str(sections, mode, "prompts.aware_section") for mode in AWARE_MODES}),
         cards=_str(p, "cards", "prompts"),
     )
 
@@ -328,7 +353,7 @@ def _build(raw: dict) -> RunConfig:
     mel = _section(raw, "meltzer", "", ("max_turn_steps",))
     lim = _section(raw, "limits", "", ("meltzer_seconds", "sample_time_limit_seconds", "wait_seconds"))
     par = _section(raw, "parallel", "", ("max_samples",))
-    seeds = _section(raw, "seeds", "", ("inspect_shuffle", "bootstrap"))
+    seeds = _section(raw, "seeds", "", ("inspect_shuffle", "card_assignment", "bootstrap"))
     return RunConfig(
         run_id=run_id,
         setting=setting,
@@ -344,6 +369,7 @@ def _build(raw: dict) -> RunConfig:
         parallel=Parallel(max_samples=_int(par, "max_samples", "parallel", minimum=1)),
         seeds=Seeds(
             inspect_shuffle=_int(seeds, "inspect_shuffle", "seeds"),
+            card_assignment=_int(seeds, "card_assignment", "seeds"),
             bootstrap=_int(seeds, "bootstrap", "seeds"),
         ),
     )
@@ -458,6 +484,7 @@ def create_run_dir(cfg: RunConfig, config_path: str | Path, results_root: Path |
             "seeds": {
                 "main_tasks": cfg.setting.main_tasks.seed,
                 "inspect_shuffle": cfg.seeds.inspect_shuffle,
+                "card_assignment": cfg.seeds.card_assignment,
                 "bootstrap": cfg.seeds.bootstrap,
             },
             "start_time": _now(),

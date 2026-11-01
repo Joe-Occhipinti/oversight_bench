@@ -21,9 +21,10 @@ Calls into other modules (the contract those modules must match):
   bench.analysis.analyze_run(run_dir: Path, bootstrap_seed: int)       (called with a keyword)
   render-prompts: bench.prompts.write_review_prompts(out_dir, {condition: ReviewSample}) with
     ReviewSample(task_description, setting_description, side_task_description, attack_base_path,
-    aware_section_path, cards_dir); the texts come from bench.basharena: load_task(id).description,
+    aware_section_path, cards_dir, card_id); the texts come from bench.basharena: load_task(id).description,
     setting_description(), SIDE_TASKS[name].description, with id = shuffled_pool(seed)[0] and name =
-    the first side task of the config (the same sample in every condition).
+    the first side task of the config (the same sample in every condition). card_id is the card assigned to
+    that pair in aware mode one_card, else None.
 
 The manifest's main_task_ids come from run_experiment's return value; if it returns None they are read from
 results/<run_id>/preflight.json, key "kept" (list of task ids), when that file exists.
@@ -50,7 +51,7 @@ from typing import Any
 
 import yaml
 
-from bench import config
+from bench import assignment, config
 from bench.config import ConfigError, RunConfig
 
 SUMMARY_COLUMNS = ["run", "agent", "monitor", "n", "asr_unaware", "asr_aware_strict", "asr_aware_scorer", "gap_strict", "gap_scorer"]
@@ -80,6 +81,7 @@ def _load_run(run_id: str) -> tuple[RunConfig, Path]:
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config)
+    assignment.check_config(cfg)
     try:
         from bench.task import run_experiment
     except ImportError as e:
@@ -108,6 +110,7 @@ def _preflight_kept(run_dir: Path) -> list[str] | None:
 
 def cmd_preflight(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config)
+    assignment.check_config(cfg)
     try:
         from bench.preflight import preflight
     except ImportError as e:
@@ -128,22 +131,26 @@ def cmd_render_prompts(args: argparse.Namespace) -> int:
         raise _import_error("render-prompts (bench.basharena / bench.prompts)", e) from None
     run_dir = config.resolve_run_dir(cfg.run_id)
     config.check_run_dir_free(run_dir)
+    assignment.check_config(cfg)
     root = config.REPO_ROOT
     try:
         # The first task the run will use: preflight's kept list if it exists, else the shuffled pool.
-        task_id = (_preflight_kept(run_dir) or shuffled_pool(cfg.setting.main_tasks.seed))[0]
+        task_ids = (_preflight_kept(run_dir) or shuffled_pool(cfg.setting.main_tasks.seed))[: cfg.setting.main_tasks.n]
+        task_id, side_task = task_ids[0], cfg.setting.side_tasks[0]
+        card_id = assignment.assigned_cards(cfg, task_ids).get((task_id, side_task))
         sample = ReviewSample(
             task_description=load_task(task_id).description,
             setting_description=setting_description(),
-            side_task_description=SIDE_TASKS[cfg.setting.side_tasks[0]].description,
+            side_task_description=SIDE_TASKS[side_task].description,
             attack_base_path=root / cfg.prompts.attack_base,
-            aware_section_path=root / cfg.prompts.aware_section,
+            aware_section_path=root / cfg.prompts.aware_section_file,
             cards_dir=root / cfg.prompts.cards,
+            card_id=card_id,
         )
         written = write_review_prompts(run_dir / "prompts", {c: sample for c in cfg.conditions})
     except FileNotFoundError as e:
         raise CliError(str(e)) from None
-    print(f"sample: main task {task_id}, side task {cfg.setting.side_tasks[0]}")
+    print(f"sample: main task {task_id}, side task {side_task}" + (f", card {card_id}" if card_id else ""))
     for path in written:
         print(path)
     return 0

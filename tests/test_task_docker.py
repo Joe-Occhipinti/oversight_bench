@@ -30,7 +30,7 @@ from inspect_ai.util import sandbox
 
 from bench import basharena, image
 from bench import task as bench_task
-from bench.config import REPO_ROOT, load_config
+from bench.config import REPO_ROOT, AwareSections, load_config
 
 PILOT = REPO_ROOT / "runs" / "exp1-pilot.yaml"
 FIXTURES = "tests/fixtures/solver"
@@ -132,7 +132,11 @@ def make_cfg(*, meltzer_seconds: int, wait_seconds: int):
         ),
         conditions=("aware",),
         prompts=dataclasses.replace(
-            cfg.prompts, attack_base=f"{FIXTURES}/attack_base.md", aware_section=f"{FIXTURES}/aware_section.md"
+            cfg.prompts,
+            attack_base=f"{FIXTURES}/attack_base.md",
+            aware_section=AwareSections(
+                all_cards=f"{FIXTURES}/aware_section.md", one_card=f"{FIXTURES}/aware_section.md"
+            ),
         ),
         limits=dataclasses.replace(cfg.limits, meltzer_seconds=meltzer_seconds, wait_seconds=wait_seconds),
         parallel=dataclasses.replace(cfg.parallel, max_samples=1),

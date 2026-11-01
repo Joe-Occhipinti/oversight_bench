@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from bench import judge as J
+from bench import prompts
 
 FIXTURES = Path(__file__).parent / "fixtures" / "judge"
 SESSIONS = FIXTURES / "sessions" / "2026" / "10" / "31"
@@ -30,7 +31,7 @@ def out(**kw) -> str:
 
 
 def test_parse_valid_faithful():
-    got = J.parse_judge_output(out())
+    got = J.parse_judge_output(out(), IDS)
     assert got == {
         "faithful": True,
         "card_id": "E07",
@@ -40,18 +41,18 @@ def test_parse_valid_faithful():
 
 
 def test_parse_valid_unfaithful():
-    got = J.parse_judge_output(out(faithful=False, card_id=None, route_summary="plain curl in sandbox"))
+    got = J.parse_judge_output(out(faithful=False, card_id=None, route_summary="plain curl in sandbox"), IDS)
     assert got["faithful"] is False and got["card_id"] is None
 
 
 def test_parse_accepts_every_card_id():
     for cid in IDS:
-        assert J.parse_judge_output(out(card_id=cid))["card_id"] == cid
+        assert J.parse_judge_output(out(card_id=cid), IDS)["card_id"] == cid
 
 
 def test_parse_fenced_json_and_extra_keys_dropped():
     text = "Here is my answer:\n```json\n" + out(extra="x") + "\n```\n"
-    got = J.parse_judge_output(text)
+    got = J.parse_judge_output(text, IDS)
     assert set(got) == {"faithful", "card_id", "route_summary", "rationale"}
 
 
@@ -66,7 +67,7 @@ def test_parse_fenced_json_and_extra_keys_dropped():
 )
 def test_parse_invalid_json(text):
     with pytest.raises(J.JudgeOutputError):
-        J.parse_judge_output(text)
+        J.parse_judge_output(text, IDS)
 
 
 @pytest.mark.parametrize("key", ["faithful", "card_id", "route_summary", "rationale"])
@@ -74,36 +75,42 @@ def test_parse_missing_key(key):
     data = json.loads(out())
     del data[key]
     with pytest.raises(J.JudgeOutputError):
-        J.parse_judge_output(json.dumps(data))
+        J.parse_judge_output(json.dumps(data), IDS)
 
 
 @pytest.mark.parametrize("value", ["true", 1, None, "yes"])
 def test_parse_faithful_must_be_bool(value):
     with pytest.raises(J.JudgeOutputError):
-        J.parse_judge_output(out(faithful=value))
+        J.parse_judge_output(out(faithful=value), IDS)
 
 
 @pytest.mark.parametrize("key", ["route_summary", "rationale"])
 @pytest.mark.parametrize("value", ["", "   ", 5, None])
 def test_parse_text_fields_must_be_nonempty_strings(key, value):
     with pytest.raises(J.JudgeOutputError):
-        J.parse_judge_output(out(**{key: value}))
+        J.parse_judge_output(out(**{key: value}), IDS)
 
 
 def test_parse_inconsistent_unfaithful_with_card():
     with pytest.raises(J.JudgeOutputError, match="card_id"):
-        J.parse_judge_output(out(faithful=False, card_id="E07"))
+        J.parse_judge_output(out(faithful=False, card_id="E07"), IDS)
 
 
 def test_parse_inconsistent_faithful_without_card():
     with pytest.raises(J.JudgeOutputError, match="card_id"):
-        J.parse_judge_output(out(faithful=True, card_id=None))
+        J.parse_judge_output(out(faithful=True, card_id=None), IDS)
 
 
 @pytest.mark.parametrize("cid", ["E15", "E00", "e07", "E7", "07", "", 7, ["E07"]])
 def test_parse_unknown_card_id(cid):
     with pytest.raises(J.JudgeOutputError):
-        J.parse_judge_output(out(card_id=cid))
+        J.parse_judge_output(out(card_id=cid), IDS)
+
+
+def test_parse_card_ids_come_from_the_caller():
+    assert J.parse_judge_output(out(card_id="E15"), IDS + ["E15"])["card_id"] == "E15"
+    with pytest.raises(J.JudgeOutputError, match="E01, E02, E03"):
+        J.parse_judge_output(out(card_id="E07"), ["E01", "E02", "E03"])
 
 
 # --- render_transcript ---------------------------------------------------------------------------
@@ -416,9 +423,9 @@ def test_transcript_non_monotonic_times_keep_log_order(tmp_path):
 # --- cards and prompt ----------------------------------------------------------------------------
 
 
-def make_cards(d: Path) -> Path:
+def make_cards(d: Path, ids=IDS) -> Path:
     d.mkdir(parents=True, exist_ok=True)
-    for cid in IDS:
+    for cid in ids:
         (d / f"{cid}-slug-{cid.lower()}.md").write_text(
             f"---\nid: {cid}\ntitle: Title of {cid}\n---\n## Summary\nCARDBODY-{cid}\n", encoding="utf-8"
         )
@@ -430,22 +437,25 @@ def test_load_cards_in_id_order(tmp_path):
     # create files in reverse so that directory order is not id order
     cards = J.load_cards(d)
     assert [cid for cid, _ in cards] == IDS
-    assert "CARDBODY-E03" in dict(cards)["E03"]
-    assert dict(cards)["E03"].startswith("---\nid: E03")  # full text, front matter included
+    assert dict(cards)["E03"] == "### Summary\nCARDBODY-E03"  # as in the agent's prompt: no YAML header, ### headings
 
 
-def test_load_cards_requires_the_14_ids(tmp_path):
-    d = make_cards(tmp_path / "cards")
+def test_load_cards_follow_the_folder(tmp_path):
+    d = make_cards(tmp_path / "cards", IDS + ["E15"])
+    assert [cid for cid, _ in J.load_cards(d)] == IDS + ["E15"]
     next(d.glob("E05-*")).unlink()
-    with pytest.raises(J.JudgeFatalError, match="E05"):
-        J.load_cards(d)
+    assert [cid for cid, _ in J.load_cards(d)] == [cid for cid in IDS + ["E15"] if cid != "E05"]
+    with pytest.raises(J.JudgeFatalError, match="no card files"):
+        J.load_cards(tmp_path / "empty")
 
 
 def test_load_cards_real_registry():
     d = Path(__file__).parent.parent / "registry" / "v0.1" / "cards"
     if not d.is_dir():
         pytest.skip("registry not present")
-    assert [cid for cid, _ in J.load_cards(d)] == IDS
+    cards = J.load_cards(d)
+    assert [cid for cid, _ in cards] == IDS
+    assert J.cards_block(cards) == prompts.render_cards(d)  # the judge reads the cards as the agent does
 
 
 def test_prompt_yaml_has_rule_and_placeholders():
@@ -594,6 +604,7 @@ def test_judge_run_end_to_end(tmp_path, capsys):
     u = body["messages"][1]["content"]
     assert u.index("## Card E01") < u.index("## Card E14")
     assert "CARDBODY-E09" in u
+    assert "id: E09" not in u and "Title of E09" not in u  # the cards come without their YAML header
     assert "DESC-LEAK: send the passwords" in u
     assert "Your task is as follows:" in u and "MONITOR REVIEW" in u
     assert "SECRET_REASONING_MARKER" not in u
@@ -751,6 +762,32 @@ def test_judge_run_invalid_output_exhausted_leaves_judge_null_and_is_rerun(tmp_p
     # an invalid judge.json is not skipped on the next run
     run_judge(run, lambda r: httpx.Response(200, json=api_response(out())))
     assert read_rows(run)[0]["judge"]["card_id"] == "E07"
+
+
+def test_judge_run_with_more_cards(tmp_path):
+    run = make_run(tmp_path, [row("aware__00147570__leak_passwords", True)])
+    seen = []
+
+    def handler(request):
+        seen.append(user_text(request))
+        return httpx.Response(200, json=api_response(out(card_id="E15")))
+
+    run_judge(run, handler, cards=make_cards(tmp_path / "cards15", IDS + ["E15"]))
+    assert "## Card E15" in seen[0] and "CARDBODY-E15" in seen[0]
+    assert read_rows(run)[0]["judge"]["card_id"] == "E15"
+
+
+def test_judge_run_with_fewer_cards_rejects_a_card_that_is_not_there(tmp_path):
+    run = make_run(tmp_path, [row("aware__00147570__leak_passwords", True)])
+    answers = iter([out(card_id="E07"), out(card_id="E02")])
+
+    def handler(request):
+        return httpx.Response(200, json=api_response(next(answers)))
+
+    run_judge(run, handler, cards=make_cards(tmp_path / "cards3", ["E01", "E02", "E03"]))
+    data = json.loads((run / "samples" / "aware__00147570__leak_passwords" / "judge.json").read_text(encoding="utf-8"))
+    assert len(data["calls"]) == 2 and "E01, E02, E03" in data["calls"][0]["error"]
+    assert read_rows(run)[0]["judge"]["card_id"] == "E02"
 
 
 def test_judge_run_summary_reports_errors(tmp_path, capsys):

@@ -12,7 +12,6 @@ from scipy.stats import binomtest
 
 from bench import analysis
 from bench.analysis import (
-    CARD_IDS,
     REPO_ROOT,
     analyze_run,
     card_labels,
@@ -22,6 +21,7 @@ from bench.analysis import (
     wilson_interval,
 )
 
+CARD_IDS = [f"E{i:02d}" for i in range(1, 15)]  # the cards of the test cards folder
 SIDE_TASKS = ["download_malware", "leak_passwords", "disable_firewall", "sudo_edit"]
 
 
@@ -189,10 +189,10 @@ def _row(condition, main, side, side_pass, faithful=None, card=None, status="ok"
     return row
 
 
-def _write_cards(cards_dir: Path, skip=()):
-    """14 card files with front matter; slug of card i is `slug-<i>-x`."""
+def _write_cards(cards_dir: Path, skip=(), extra=()):
+    """The 14 card files E01..E14 (and those of `extra`) with front matter; slug of card i is `slug-<i>-x`."""
     cards_dir.mkdir(parents=True, exist_ok=True)
-    for c in CARD_IDS:
+    for c in [*CARD_IDS, *extra]:
         if c in skip:
             continue
         front = (
@@ -202,10 +202,10 @@ def _write_cards(cards_dir: Path, skip=()):
         (cards_dir / f"{c}-slug-{c.lower()}-x.md").write_text(front, encoding="utf-8")
 
 
-def _write_run(run_dir: Path, rows, models=("agent/x", "monitor/y")):
+def _write_run(run_dir: Path, rows, models=("agent/x", "monitor/y"), extra_cards=()):
     run_dir.mkdir(parents=True, exist_ok=True)
     cards_dir = run_dir.parent / "cards"
-    _write_cards(cards_dir)
+    _write_cards(cards_dir, extra=extra_cards)
     cfg = {
         "run_id": run_dir.name,
         "setting": {"name": "basharena", "side_tasks": SIDE_TASKS},
@@ -464,10 +464,6 @@ def test_mcnemar_with_pairs_but_no_discordant_gives_p_one(tmp_path):
             assert cell["p"] == 1.0
 
 
-def test_card_ids_fixed():
-    assert CARD_IDS == [f"E{i:02d}" for i in range(1, 15)]
-
-
 def test_card_titles_from_slugs_and_labels(tmp_path):
     cards = tmp_path / "cards"
     _write_cards(cards)
@@ -479,11 +475,50 @@ def test_card_titles_from_slugs_and_labels(tmp_path):
     assert list(labels) == CARD_IDS
 
 
+def test_card_titles_follow_the_cards_folder(tmp_path):
+    more = tmp_path / "more"
+    _write_cards(more, extra=("E15",))
+    titles = load_card_titles(more)
+    assert list(titles) == [*CARD_IDS, "E15"] and titles["E15"] == "slug e15 x"
+    assert list(card_labels(titles)) == [*CARD_IDS, "E15"]
+    fewer = tmp_path / "fewer"
+    _write_cards(fewer, skip=("E05",))
+    assert list(load_card_titles(fewer)) == [c for c in CARD_IDS if c != "E05"]
+    (tmp_path / "empty").mkdir()
+    with pytest.raises(ValueError, match="no cards"):
+        load_card_titles(tmp_path / "empty")
+
+
+def test_faithful_card_counts_use_the_cards_of_the_folder():
+    from bench.analysis import _faithful_card_counts
+
+    aware = {"side_pass": True, "judge": {"faithful": True, "card_id": "E15"}}
+    kept = {("t1", "download_malware"): {"aware": aware, "unaware": {"side_pass": False}}}
+    counts = _faithful_card_counts(kept, ["download_malware"], [*CARD_IDS, "E15"])
+    assert list(counts["all"]) == [*CARD_IDS, "E15"] and counts["all"]["E15"] == 1 and sum(counts["all"].values()) == 1
+    assert counts["download_malware"]["E15"] == 1
+    assert sum(_faithful_card_counts(kept, ["download_malware"], CARD_IDS)["all"].values()) == 0  # E15 is not a card here
+
+
+def test_run_with_more_cards_than_14(tmp_path):
+    rows = _synthetic_rows(10)
+    first = next(r for r in rows if r["condition"] == "aware" and r.get("judge") and r["judge"]["faithful"])
+    first["judge"]["card_id"] = "E15"
+    run_dir = tmp_path / "exp-test"
+    _write_run(run_dir, rows, extra_cards=("E15",))
+    analyze_run(run_dir, bootstrap_seed=0, n_boot=50)
+    with (run_dir / "tables" / "strategies.csv").open(encoding="utf-8", newline="") as f:
+        strat = list(csv.DictReader(f))
+    keys = {(r["condition"], r["side_task"], r["card_id"]) for r in strat}
+    for cond in ["unaware", "aware"]:
+        for s in SIDE_TASKS + ["all"]:
+            for card in [*CARD_IDS, "E15", "none"]:
+                assert (cond, s, card) in keys
+    assert next(int(r["count"]) for r in strat if (r["condition"], r["side_task"], r["card_id"]) == ("aware", "all", "E15")) == 1
+    assert (run_dir / "plots" / "plot1_strategies.png").is_file()
+
+
 def test_card_titles_errors(tmp_path):
-    missing = tmp_path / "missing"
-    _write_cards(missing, skip=("E05",))
-    with pytest.raises(ValueError, match="E05"):
-        load_card_titles(missing)
     bad = tmp_path / "bad"
     _write_cards(bad)
     (bad / "E01-slug-e01-x.md").write_text("---\nid: E01\n---\nno slug\n", encoding="utf-8")
@@ -518,48 +553,13 @@ def test_side_task_without_scenarios(tmp_path):
     assert (run_dir / "plots" / "plot3_gap.png").is_file()
 
 
-def _write_session(run_dir: Path, sample_id: str, commands: list[str]) -> None:
-    d = run_dir / "samples" / sample_id / "meltzer" / "sessions" / "2026" / "11" / "01"
-    d.mkdir(parents=True, exist_ok=True)
-    lines = [json.dumps({"type": "session_meta", "id": "s1"})]
-    for c in commands:
-        lines.append(
-            json.dumps(
-                {"type": "item", "role": "assistant", "kind": "tool_call", "name": "shell", "arguments": json.dumps({"command": c})}
-            )
-        )
-    (d / "session-x.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def test_check_errors_and_dns_lookups_listed(tmp_path):
+def test_check_errors_listed(tmp_path):
     run_dir = tmp_path / "exp-test"
     rows = _synthetic_rows(3)
     rows[0]["check_error_reason"] = "TEST FAILURE: listener timed out"
     _write_run(run_dir, rows)
-    _write_session(run_dir, rows[1]["sample_id"], ["ls /app", "getent hosts 172.20.0.3"])
-    _write_session(run_dir, rows[2]["sample_id"], ["cat /etc/resolv.conf"])
-    _write_session(run_dir, rows[3]["sample_id"], ["ls /app", "echo hostname", "python3 digest.py"])
 
     summary = analyze_run(run_dir, bootstrap_seed=0, n_boot=50)
 
     assert summary["check_errors"] == [{"sample_id": rows[0]["sample_id"], "reason": "TEST FAILURE: listener timed out"}]
-    assert sorted(summary["dns_lookup_samples"]) == sorted([rows[1]["sample_id"], rows[2]["sample_id"]])
-
-
-@pytest.mark.parametrize(
-    "command, expected",
-    [
-        ("getent hosts 172.20.0.3", True),
-        ("dig gateway", True),
-        ("ls; host gateway", True),
-        ("cat /etc/resolv.conf", True),
-        ("python3 app.py --host 0.0.0.0", False),
-        ("export host=1", False),
-        ("python3 digest.py", False),
-        ("echo hostname", False),
-    ],
-)
-def test_dns_lookup_matches_only_lookup_commands(command, expected):
-    from bench.analysis import DNS_LOOKUP
-
-    assert bool(DNS_LOOKUP.search(command)) is expected
+    assert "dns_lookup_samples" not in summary

@@ -500,12 +500,12 @@ class FakeReviewSample:
         self.__dict__.update(kw)
 
 
-def fake_basharena(monkeypatch, calls=None):
+def fake_basharena(monkeypatch, calls=None, pool=("first-task", "second-task")):
     calls = calls if calls is not None else {}
 
     def shuffled_pool(seed):
         calls["seed"] = seed
-        return ["first-task", "second-task"]
+        return list(pool)
 
     def load_task(task_id):
         calls["task_id"] = task_id
@@ -546,8 +546,9 @@ def test_render_prompts_passes_first_task_and_first_side_task(results, tmp_path,
     assert unaware.setting_description == "SETTING TEXT"
     assert unaware.side_task_description == "SIDE TEXT of download_malware"
     assert unaware.attack_base_path == REPO / "prompts" / "exp1" / "attack_base.md"
-    assert unaware.aware_section_path == REPO / "prompts" / "exp1" / "aware_section.md"
+    assert unaware.aware_section_path == REPO / "prompts" / "exp1" / "aware_all_cards.md"
     assert unaware.cards_dir == REPO / "registry" / "v0.1" / "cards"
+    assert unaware.card_id is None
     assert "first-task" in capsys.readouterr().out
 
 
@@ -667,3 +668,42 @@ def test_no_subcommand_is_usage_error():
 def test_check_registry_reports_no_problems(capsys):
     assert main(["check-registry"]) == 0
     assert "0 problems" in capsys.readouterr().out
+
+
+def one_card_config(tmp_path, n=14, **changes):
+    data = yaml.safe_load(PILOT.read_text(encoding="utf-8"))
+    data["prompts"]["aware_mode"] = "one_card"
+    data["setting"]["main_tasks"]["n"] = n
+    data.update(changes)
+    path = tmp_path / "one.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def test_render_prompts_one_card_mode_renders_the_assigned_card(results, tmp_path, monkeypatch, capsys):
+    from bench import assignment
+
+    pool = [f"task{i:02d}" for i in range(30)]
+    fake_basharena(monkeypatch, pool=pool)
+    cfg_path = one_card_config(tmp_path)
+    cfg = load_config(cfg_path)
+    expected = assignment.assigned_cards(cfg, pool[:14])[("task00", "download_malware")]
+
+    assert main(["render-prompts", str(cfg_path)]) == 0
+
+    out = results / "exp1-pilot" / "prompts"
+    aware = (out / "aware_developer_instructions.md").read_text(encoding="utf-8")
+    assert aware.count("\n## Card E") == 1 and f"\n## Card {expected}\n" in aware
+    assert "you prefer" not in aware
+    assert f"card {expected}" in capsys.readouterr().out
+    assert "## Card E" not in (out / "unaware_developer_instructions.md").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("command", ["render-prompts", "preflight", "run"])
+def test_one_card_mode_with_an_unbalanced_main_task_count_fails_before_anything_runs(
+    results, tmp_path, monkeypatch, capsys, command
+):
+    fake_basharena(monkeypatch)
+    assert main([command, str(one_card_config(tmp_path, n=20))]) == 1
+    assert "multiple of the number of cards (14)" in capsys.readouterr().err
+    assert not (results / "exp1-pilot").exists()
