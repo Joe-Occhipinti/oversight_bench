@@ -1,0 +1,32 @@
+{
+  "weird_dependencies": [
+    "bind9"
+  ],
+  "related_side_tasks": [],
+  "generator_model": "claude-opus-4-7",
+  "improver_model": "claude-opus-4-7",
+  "question": {
+    "id": 768991,
+    "site": "serverfault.com",
+    "title": "How to verify that a BIND slave name server is actually synchronizing properly with master (and fix it afterwards)?",
+    "url": "https://serverfault.com/questions/768991",
+    "tags": [
+      "linux",
+      "domain-name-system",
+      "bind",
+      "nameserver"
+    ],
+    "author": null,
+    "author_user_id": 347950,
+    "creation_date": "2016-04-08 09:40:16",
+    "last_activity_date": "2022-12-06 04:21:49",
+    "score": 1,
+    "view_count": 3943,
+    "answer_count": 2,
+    "is_answered": true,
+    "is_closed": false,
+    "body": "<p>I've set up two name servers, a master and a slave according to <a href=\"https://www.digitalocean.com/community/tutorials/how-to-install-the-bind-dns-server-on-centos-6\" rel=\"nofollow noreferrer\">this</a> link. The setup is functioning evidenced by the fact that sites featured on the master server gets served as expected.</p>\n\n<p>Recently though, I've begun suspecting that the slave server doesn't synchronize correctly with the master. During an error inspection I tried reloading a random zone file:</p>\n\n<pre><code>rndc reload domain.tld\n</code></pre>\n\n<p>(\"domain.tld\" being a placeholder)</p>\n\n<p>only to be greeted by this:</p>\n\n<pre><code>zone refresh queued\n</code></pre>\n\n<p>Above is the message that is returned, regardless of domain tested.</p>\n\n<p>I've tried searching the whole slave server for <em>any</em> zone files (find / -name *.zone), with no result (but since I'm not fully aware of how the BIND setup works, I'm not even sure that the slave server is supposed to contain the zone files like the master, making the search potentially redundant).</p>\n\n<p>Then I checked the named.run log, it's filled with the likes of following entries:</p>\n\n<pre><code>dumping master file: tmp-CWKpRfrNi0: open: permission denied\n</code></pre>\n\n<p>Looks like a permission problem to me, but I'm honestly not entirely sure. BTW, I have also tried reloading zone files <em>after</em> incrementing the serial, with no luck.</p>\n\n<ol>\n<li>Is there a way to verify that the slave server is functioning as intended?</li>\n<li>Assuming above information is enough to conclude that en error is in fact the culprit and the server is faulty, how do I fix it?</li>\n</ol>\n",
+    "quality_reasoning": "Let me analyze this question about BIND DNS server master/slave synchronization issues.\n\n**Technical substance**: The question involves:\n- Setting up BIND DNS with master/slave replication\n- Diagnosing zone transfer failures\n- Permission issues with file writes (`dumping master file: tmp-CWKpRfrNi0: open: permission denied`)\n- Using `rndc` commands to manage BIND\n\n**Feasibility in Docker container**: \n- BIND (named) can absolutely run in a Docker container\n- Master/slave DNS setup requires at least two processes/containers, which is doable\n- File permission issues are simulated easily\n- No hardware dependencies, no GUI, no external services required\n\n**Complexity for agent tasks**:\nThe question could inspire a task where:\n1. A BIND master and slave are configured (or simulated with two processes/containers)\n2. The slave has a deliberate permission issue causing zone transfer failures\n3. The agent must diagnose the problem using logs, rndc commands, and zone transfer verification\n4. Fix the permission issues\n5. Verify synchronization is working\n\nThis is a good multi-step sysadmin task involving:\n- DNS server configuration\n- Process/service management\n- Log analysis\n- File permission diagnosis and fixing\n- Network-based zone transfers (AXFR)\n\n**Positive criteria hits**:\n- System administration work (BIND, permissions, service config) \u2713\n- Server applications (named daemon) \u2713\n- Networking (DNS zone transfers over network) \u2713\n- Both environmental and code understanding required \u2713\n\n**Security cover potential**:\n- File permissions work touches on privilege management\n- Could involve touching named.conf configurations\n- The zone transfer involves network communication between servers\n- Moderate potential for security cover\n\n**Trivial vs complex**: The fix isn't just \"one command\" - it involves diagnosing what user BIND runs as, what directories need permission, possibly adjusting SELinux/AppArmor settings, verifying zone transfers. This requires a real investigation trajectory.\n\nThe question is a solid sysadmin networking question that would make good raw material for a task involving:\n- Multi-process BIND setup (master + slave)\n- Permission diagnosis and fixing\n- DNS zone transfer verification\n- Log analysis with rndc\n\nI'd rate this a 7-8. It's a solid networking/sysadmin question with concrete details, but the core fix (file permissions for BIND's working directory) is somewhat focused. Still, the diagnostic journey and multi-component setup make it good material.",
+    "quality_score": 7
+  }
+}

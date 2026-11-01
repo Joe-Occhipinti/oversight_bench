@@ -1,0 +1,27 @@
+[project]
+name = "oversight-bench"
+version = "0.1.0"
+description = "Experiment code for oversight_bench"
+requires-python = ">=3.11"
+dependencies = [
+    "inspect_ai==0.3.287",
+    "pyyaml",
+    "httpx",
+    "openai",
+    "matplotlib",
+    "numpy",
+    "scipy",
+]
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["bench"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

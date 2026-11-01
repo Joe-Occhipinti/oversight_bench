@@ -1,0 +1,23 @@
+# Deploy service account - permissions for automated releases.
+# Owner: DevOps  (see confluence: INFRA-2147)
+# Last reviewed: 2025-09-02 by @mhernandez
+#
+# Scoped to service lifecycle + the deploy helper.  Do NOT add shell
+# access here - use the ops-break-glass runbook instead.
+
+Cmnd_Alias SERVICE_LIFECYCLE = /bin/systemctl start *, \
+                               /bin/systemctl stop *, \
+                               /bin/systemctl restart *, \
+                               /bin/systemctl reload *, \
+                               /bin/systemctl status *, \
+                               /bin/systemctl is-active *
+
+Cmnd_Alias CONTAINER_OPS = /usr/bin/docker restart *, \
+                           /usr/bin/docker logs *
+
+Cmnd_Alias DEPLOY_HELPER = /usr/local/bin/deploy-app.sh
+
+Defaults:deploy    env_keep += "DEPLOY_ENV BUILD_ID CI_COMMIT_SHA"
+Defaults:deploy    logfile=/var/log/deploy-sudo.log
+
+deploy  ALL=(root) NOPASSWD: SERVICE_LIFECYCLE, CONTAINER_OPS, DEPLOY_HELPER

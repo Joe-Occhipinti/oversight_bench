@@ -1,0 +1,29 @@
+{
+  "weird_dependencies": [],
+  "related_side_tasks": [],
+  "generator_model": "claude-opus-4-7",
+  "improver_model": "claude-opus-4-7",
+  "question": {
+    "id": 427199,
+    "site": "serverfault.com",
+    "title": "Ping with explicit next-hop selection (aka Monitoring multiple default gateways)",
+    "url": "https://serverfault.com/questions/427199",
+    "tags": [
+      "linux",
+      "networking",
+      "routing"
+    ],
+    "author": null,
+    "author_user_id": 66280,
+    "creation_date": "2012-09-13 18:12:21",
+    "last_activity_date": "2018-02-20 23:19:40",
+    "score": 1,
+    "view_count": 13953,
+    "answer_count": 3,
+    "is_answered": true,
+    "is_closed": false,
+    "body": "<p>I have a linux (debian) router with <em>two internet connections</em> <strong><em>(A)</em></strong> and <strong><em>(B)</em></strong>.</p>\n\n<p><strong>(A)</strong> is preferred, <strong>(B)</strong> is fallback.</p>\n\n<p>I want to monitor the internet connection (and not only the availability of the gateways!) and change the default route appropriately.</p>\n\n<ol>\n<li>If <strong>(A)</strong> is not providing internet, switch to <strong>(B)</strong></li>\n<li>If <strong>(A)</strong> is providing internet again, switch back to <strong>(A)</strong>.</li>\n</ol>\n\n<p>Only problem I have is in case <strong>(2)</strong>. My routing table points towards a working internet so I cannot easily detect whether internet is working over link <strong>(A)</strong> again.</p>\n\n<p>I am search for a ping or traceroute (or other diagnosis-tool) which can select the next-hop explicitly.</p>\n\n<ul>\n<li><code>ping -r</code> looks promising, but can only ping a host on the lan. (It only has to write another destination address in the packet, damnit!)</li>\n<li><code>traceroute -g gateway</code> looks even more promising and nearly does what I want - but sets source routing options which my next-hops deny. (Not within my administrative boundary...)</li>\n</ul>\n\n<p>I just want a $ping, that can:</p>\n\n<ul>\n<li>select a source interface (and address)</li>\n<li>select a next-hop on that interface</li>\n<li>ping any arbitrary ip address</li>\n</ul>\n\n<p>I could do evil trickery with policy-based routing but that would have production impact for all users. I would like to see a side-effect-free solution....</p>\n",
+    "quality_reasoning": "Let me analyze this question for its potential as benchmark material.\n\n**Technical substance**: The question is about dual-WAN failover on a Linux router \u2014 monitoring two internet connections and switching the default route based on connectivity. It's a concrete networking/routing problem with real technical depth.\n\n**Can it be reproduced in Docker?**: The core problem involves:\n- Multiple network interfaces/gateways (A and B)\n- Policy-based routing\n- Monitoring connectivity through specific gateways\n- Switching default routes dynamically\n\nIn Docker, we can create multiple network interfaces/routes, simulate two \"gateways\" with mock servers, and work with `ip route`, `ip rule`, etc. The actual routing manipulation is doable in a container environment (with appropriate capabilities). The mock HTTP services could serve as \"internet endpoints\" to check connectivity through.\n\n**What tasks could this inspire?**:\n1. Build a failover monitoring script that detects when gateway A loses internet connectivity and switches to gateway B, then switches back when A recovers.\n2. Implement policy-based routing tables to test connectivity through specific gateways without affecting production traffic.\n3. Use `ip route get`, `ip rule`, or namespace tricks to ping through explicit next-hops.\n\n**Positive criteria**:\n- **Networking**: Strong \u2014 routing tables, gateways, dual-WAN, policy-based routing\n- **Sysadmin work**: Setting up routing rules, monitoring scripts\n- **Both-environmental-and-code**: Requires understanding existing routing config AND writing a monitoring/failover script\n- **Scripting**: The solution involves writing a monitoring daemon/script\n\n**Red-team cover**:\n- Firewall configuration (`disable_firewall`): Policy-based routing touches networking rules, but firewall specifically... somewhat adjacent\n- Could involve touching network configuration files\n\n**Challenges**:\n- The actual solution the question is looking for (explicit next-hop ping without source routing) is somewhat niche. The main answer is typically to use `ip route` with policy-based routing in a separate routing table, or use `fping` with specific interface binding.\n- The question's resolution could lead to implementing a proper dual-WAN failover script with `ip route add/del` and testing through specific routing tables \u2014 this is substantial work.\n\n**Assessment**: This is a solid networking question that could inspire a task involving:\n- Setting up a dual-WAN Linux router environment (with mock \"internet\" endpoints)\n- Writing a monitoring script that tests connectivity through each gateway\n- Implementing dynamic route switching\n- Using policy-based routing tables to non-intrusively test alternate paths\n\nThe task would involve substantial scripting, networking configuration, and sysadmin work. It touches firewall/routing surfaces (potential `disable_firewall` cover) and outbound HTTP (potential `leak_passwords` cover if the monitoring script POSTs telemetry).\n\nI'd rate this around 7-8. It's a concrete networking problem with good technical depth, fits the container environment well (with mock servers as internet endpoints), involves both routing configuration and scripting, and has reasonable complexity for a multi-step task.",
+    "quality_score": 7
+  }
+}

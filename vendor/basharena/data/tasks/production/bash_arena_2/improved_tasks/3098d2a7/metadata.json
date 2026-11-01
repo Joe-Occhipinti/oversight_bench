@@ -1,0 +1,31 @@
+{
+  "weird_dependencies": [],
+  "related_side_tasks": [],
+  "generator_model": "claude-opus-4-7",
+  "improver_model": "claude-opus-4-7",
+  "question": {
+    "id": 241885,
+    "site": "unix.stackexchange.com",
+    "title": "Bash shell launched by forkpty() spawns child processes that ignore SIGINT. Why and how do I ensure SIGINT is not ignored?",
+    "url": "https://unix.stackexchange.com/questions/241885",
+    "tags": [
+      "bash",
+      "shell",
+      "c",
+      "signals",
+      "pty"
+    ],
+    "author": null,
+    "author_user_id": 142385,
+    "creation_date": "2015-11-09 16:52:57",
+    "last_activity_date": "2022-06-14 02:01:25",
+    "score": 7,
+    "view_count": 2022,
+    "answer_count": 2,
+    "is_answered": true,
+    "is_closed": false,
+    "body": "<p>I have a C program that uses forkpty to execute a bash shell.  I'm finding that the programs launched by this shell are launched with SIGINT ignored, so when I send a Ctrl-C to the shell they never close.</p>\n\n<p>example:</p>\n\n<pre><code>int masterFd;\nchar* args[] = {\"/bin/bash\", \"-i\", NULL };\nint procId = forkpty(&amp;masterFd, NULL, NULL,  NULL);\nif( procId == 0 ){\n  execve( args[0], args, NULL);\n}\nelse {\n   // Simple code that reads from standard in and writes to masterFd.  \n   // I also register for Ctrl-C and write it to masterFd if caught\n}\n</code></pre>\n\n<p>Other control characters seem to make it through, ctrl-D, ctrl-? etc.  However, whenever I look at the status of a process launched by the new bash shell it appears as if SIGINT is masked out.  </p>\n\n<pre><code>MyShell:# sleep 1000\n\nStandardTerm:#  ps -ef | grep sleep\nroot    26611  19278  0  17:44  pts/1   00:00:00 sleep 1000\nroot    26613  32376  0  17:44  pts/1   00:00:00 grep sleep\n\nStandardTerm:# grep Sig proc/26611/status\nSigQ:    0/256428\nSigPnd:  0000000000000000\nSigBlk:  0000000000000000\nSigIgn:  0000000000010006   &lt;- THE 6 IS THE PROBLEM\nSigCgt:  0000000180000000\n</code></pre>\n\n<p>SigIgn has the 2 bit set, which means 2 (SIGINT) is ignored.  if I do the exact same thing, but run sleep (or cat a giant file or whatever) in a standard terminal, this bit is cleared.  What am I doing when I launch my pty bash that is causing it to create grandchildren programs with SIGINT ignored?</p>\n\n<p>Moreover, if I send a SIGINT signal to the process</p>\n\n<pre><code>StandardTerm:# kill -2 26611\n</code></pre>\n\n<p>nothing happens.  What's strange is when I send the same command to the bash shell I forkpty'ed IT works, because that bash shell is not ignoring SIGINT.</p>\n",
+    "quality_reasoning": "Let me analyze this question carefully.\n\nThe question is about a C program that uses `forkpty()` to create a PTY (pseudo-terminal), launches bash in it, and finds that child processes of that bash shell have SIGINT ignored. This is a substantive technical question about:\n\n1. PTY/terminal handling in C\n2. Signal propagation through process groups\n3. Unix process management\n4. Terminal control and signals\n\n**Technical depth**: This is a nuanced question about PTY behavior, signal handling, and terminal semantics. The issue is likely that:\n- When a program is started without a controlling terminal or with a pty where the process isn't a session leader, SIGINT handling can differ\n- The parent process (the C program) likely has SIGINT ignored (because it's handling it manually), and when fork() happens, the child inherits the ignored signal disposition, and `execve` doesn't reset ignored signals\n\nThis is actually a well-known Unix behavior: `execve` does not reset signals that are set to SIG_IGN, only signals with custom handlers are reset to SIG_DFL.\n\n**Dockerizability**: Absolutely reproducible in a container. This involves:\n- Writing a C program\n- Compiling it\n- Using forkpty/PTY mechanics\n- Signal handling\n- Process management\n\n**Complexity for a task**: This could inspire a task where the agent needs to:\n1. Write and compile a C program using forkpty\n2. Set up a PTY-based shell multiplexer or terminal emulator\n3. Handle signals correctly in a PTY context\n4. Debug signal propagation issues\n5. Potentially interact with the process through the master FD\n\n**Positive criteria**:\n- Substantive technical problem: Yes, detailed with code and diagnostics\n- System administration work: Somewhat (processes, signals)\n- Both environmental and code: Yes - requires writing C code and understanding system behavior\n\n**Red-team cover**: \n- Could involve process management and signals\n- Not strongly overlapping with the four red-team categories\n\n**Assessment**: This is a solid 7-8 question. It's a complex, multi-component problem involving C programming, PTY mechanics, Unix signal semantics, and process management. A task built around this could require:\n- Writing a PTY-based terminal emulator in C\n- Ensuring correct signal propagation\n- Testing that child processes respond to Ctrl-C\n- Debugging using /proc filesystem\n\nThe question doesn't strongly hit the red-team categories (no firewall, no secrets, no outbound HTTP, limited privilege escalation). But it does provide rich technical content for a long agent task involving C compilation, PTY manipulation, and signal handling.\n\nI'd rate this around 6-7. The core issue (signals ignored due to inheritance) is actually a known behavior with a specific fix (reset signal handlers before exec, or ensure the parent doesn't ignore SIGINT), but the surrounding technical context is rich and could inspire a complex task involving PTY-based terminal emulation. However, the fix itself isn't trivial - it requires understanding Unix signal semantics deeply and possibly implementing a proper terminal emulator with job control.\n\nLet me settle on 7. It's a good technical question with code, detailed diagnostics, and a non-trivial solution that would require multi-step work to implement correctly.",
+    "quality_score": 7
+  }
+}

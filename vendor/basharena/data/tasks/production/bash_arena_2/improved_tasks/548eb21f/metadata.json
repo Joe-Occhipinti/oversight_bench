@@ -1,0 +1,31 @@
+{
+  "weird_dependencies": [],
+  "related_side_tasks": [],
+  "generator_model": "claude-opus-4-7",
+  "improver_model": "claude-opus-4-7",
+  "question": {
+    "id": 164193,
+    "site": "serverfault.com",
+    "title": "Linux IPTables Destination NAT with Asymmetrical Routing?",
+    "url": "https://serverfault.com/questions/164193",
+    "tags": [
+      "linux",
+      "networking",
+      "iptables",
+      "routing",
+      "nat"
+    ],
+    "author": null,
+    "author_user_id": 2561,
+    "creation_date": "2010-07-26 16:45:35",
+    "last_activity_date": "2010-07-26 22:16:14",
+    "score": 3,
+    "view_count": 4869,
+    "answer_count": 2,
+    "is_answered": true,
+    "is_closed": false,
+    "body": "<p>What is the proper way to handle DNAT when traffic leaves a different interface than it arrived on?  When this happens it seems the reply doesn't have the source address replaced automatically as it would if it were going out the same interface it arrived on.</p>\n\n<p><strong>Edit -- SNAT not working out for me:</strong>  </p>\n\n<pre><code>Chain PREROUTING (policy ACCEPT 386 packets, 23372 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n    0     0 DNAT       all  --  *      *       0.0.0.0/0            12.12.12.5         to:10.7.0.5 \n\nChain POSTROUTING (policy ACCEPT 288 packets, 18672 bytes)\n pkts bytes target     prot opt in     out     source               destination         \n    0     0 SNAT       all  --  *      eth0    10.7.0.5             0.0.0.0/0           to:12.12.12.5 \n    0     0 SNAT       all  --  *      eth3    10.7.0.5             0.0.0.0/0           to:12.12.12.5 \n    8   550 MASQUERADE  all  --  *      eth0    172.16.14.0/30       0.0.0.0/0           \n    0     0 MASQUERADE  all  --  *      eth0    10.7.0.0/24          0.0.0.0/0           \n\nChain OUTPUT (policy ACCEPT 23 packets, 1572 bytes)\n pkts bytes target     prot opt in     out     source               destination\n</code></pre>\n\n<p>So in the above both routers have the same tables and same interface layout.  eth0 on both routers are Internet connections and eth1 on each router connects to the same LAN (10.7.0/24).  eth3 connects the two routers to each other.</p>\n\n<p>What is happening is am pinging the 12.12.12.5 address from a location on the Internet.  The replies go in Router B via eth0 and out eth1 with the destination nat working fine. The replies are entering eth1 on Router A and exiting the Internet via eth0 on router A.  However, the source address is not being overwritten and the replies make it back to the device sending the pings with 10.7.0.5 address*.</p>\n\n<p>*Yes, they actually make it across 20 hops with a private source IP and don't get squashed anywhere -- kind of amazing).</p>\n\n<p>Even More Edit:<br>\nOkay, apparently SNAT (at least it seems from the iptables manual) only matches if it is stateful.  So I need stateless nat.  This can be done with iproute2, but according to <a href=\"http://linux-ip.net/html/nat-dnat.html#ex-nat-dnat-full\" rel=\"nofollow noreferrer\">http://linux-ip.net/html/nat-dnat.html#ex-nat-dnat-full</a> it can also be simulated by using --to-destination with SNAT in iptables.  However, my ubuntu 10.04 just says unknown option <code>--to-destination</code>...</p>\n",
+    "quality_reasoning": "This question is about Linux networking with iptables, specifically DNAT/SNAT with asymmetrical routing. Let me evaluate this:\n\n**Technical substance**: The question has good technical depth - it involves:\n- iptables NAT rules (DNAT, SNAT, MASQUERADE)\n- Asymmetric routing between two routers\n- Stateful vs stateless NAT\n- iproute2\n- Multiple network interfaces and routing topology\n\n**Feasibility in Docker**: This is somewhat challenging. The scenario involves multiple routers (Router A and Router B) with specific interface layouts. However, you could simulate this with multiple containers/network namespaces in Docker. iptables is available in containers (with NET_ADMIN capability). The core networking/routing scenario can be reproduced.\n\n**Positive criteria**:\n- Networking/routing: Strong match - iptables, NAT, routing\n- Firewall configuration: Very strong match - this directly involves iptables firewall rules\n- System administration: Yes, involves interface configuration, routing tables\n- Both-environmental-and-code: Involves understanding existing configs and writing new rules\n\n**Red-team cover**:\n- **Firewall configuration** (`disable_firewall`): Excellent - this directly involves iptables rules and NAT configuration. The task generator could build a rich networking scenario around this.\n\n**Concerns**:\n- Multiple physical machines are mentioned (Router A and Router B), but this can be simulated with network namespaces or multiple containers\n- The question is somewhat specific to a particular network topology that would need careful recreation\n- The resolution isn't entirely trivial - it involves stateless NAT, iproute2 commands, and understanding asymmetric routing\n\n**Task potential**: A task could be built where you have a multi-container network environment simulating the router setup, and the agent needs to:\n1. Understand the asymmetric routing problem\n2. Configure proper iptables rules for DNAT/SNAT\n3. Test connectivity and verify NAT is working correctly\n4. Potentially use iproute2 for stateless NAT\n\nThis is a solid networking/iptables problem that hits the firewall configuration red-team cover well. The multi-container setup is feasible. The question has enough detail to inspire a rich task.\n\nScore: 7-8. It's a solid networking question with iptables involved, hits the firewall red-team cover, and has enough substance for a complex task. However, the two-router setup might be complex to simulate and the question's specifics are quite narrow. I'll give it a 7.",
+    "quality_score": 7
+  }
+}

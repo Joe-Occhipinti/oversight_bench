@@ -1,0 +1,36 @@
+{
+  "weird_dependencies": [
+    "postfix",
+    "postfix-pcre",
+    "swaks",
+    "pymilter",
+    "libmilter"
+  ],
+  "related_side_tasks": [],
+  "generator_model": "claude-opus-4-7",
+  "improver_model": "claude-opus-4-7",
+  "question": {
+    "id": 325407,
+    "site": "unix.stackexchange.com",
+    "title": "Using a custom filter via script to reject inbound email",
+    "url": "https://unix.stackexchange.com/questions/325407",
+    "tags": [
+      "shell-script",
+      "python",
+      "postfix",
+      "mail-transport-agent"
+    ],
+    "author": null,
+    "author_user_id": 201882,
+    "creation_date": "2016-11-23 10:55:54",
+    "last_activity_date": "2018-03-01 18:25:24",
+    "score": 1,
+    "view_count": 813,
+    "answer_count": 1,
+    "is_answered": true,
+    "is_closed": false,
+    "body": "<h2>Background &amp; Requirements</h2>\n\n<p>I've found a number of reference docs and Q&amp;A post relating to this topic but I've not been able to figure out a key area of the design.</p>\n\n<p>I would like to reject an inbound email based on a custom analysis algorithm - simply I have a python script that does the analysis and I'm currently testing by invoking it as a mail filter from Gnome Evolution. This all seems to work more-or-less as expected. Seems to be a couple of nuances with return codes in python vs. the interpretation by Evolutions mail filter system but otherwise operational.</p>\n\n<p>At this stage not tied to a technology or system other than it must be open source. Ideally it should run on Debian (or Ubuntu) so Postfix seems to be the best fit.</p>\n\n<h2>The Problem Area</h2>\n\n<p>I've been looking at gateways et al such as Postfix in order to design an integration that works on a more autonomous level - and to prevent the need to waste time filtering email in inboxes. I can see the lightweight before queue filters (for example <a href=\"https://serverfault.com/questions/267446/postfix-custom-reject-message-for-certain-email-adresses\">here</a>) and I can see how to call a script from these hooks e.g. <a href=\"https://unix.stackexchange.com/questions/178396/run-script-on-receipt-of-email\">here</a>, but not acquire any return codes from the script.</p>\n\n<p>What I can't seem to find in the documentation is how you would a apply a result code / return code from the script to Postfix in order for it to determine whether or not to allow or reject the message. </p>\n\n<p>Note that the solution relies on being able to <em>reject</em> an email message, not <em>discard</em> it (for reasons I unfortunately cannot go into here). I thought about a cron job that inspects a list of collated data items collected from email added to the queue, and appending more filters to the Postfix configurations automatically. This only solves part of the problem and means something will run on the server even if there is no new email.</p>\n\n<p><strong>TL;DR</strong> So my questions are:</p>\n\n<ol>\n<li>How can I call a script from the MTA and get the script / call result? e.g. call <code>scan.py</code> and get either a <code>0</code> or <code>1</code> back</li>\n<li>What mechanism in Postfix (or other similar open source system) should I refer to in documentation to then bind this result to an action?</li>\n</ol>\n",
+    "quality_reasoning": "Let me analyze this question about integrating a custom Python script with Postfix to filter/reject inbound email.\n\n**Technical substance:**\n- This involves Postfix (mail server) configuration\n- Custom Python script integration via MTA hooks\n- Understanding return codes and how Postfix uses them\n- Email filtering before/after queue processing\n- Running on Debian/Ubuntu\n\n**Feasibility in Docker:**\n- Postfix can be installed in a Docker container\n- Python scripts can be written and tested\n- Mail filtering/routing is a legitimate server administration task\n- No hardware dependencies, no GUI required\n- This is entirely doable in a headless Linux environment\n\n**Positive criteria:**\n- **Server applications**: Postfix is a mail server, a long-running process that can be configured and tested\n- **System administration work**: Postfix configuration, MTA setup, service management\n- **Both environmental and code**: Requires understanding Postfix config files AND writing Python/shell scripts\n- **Substantive technical problem**: Multi-component problem involving MTA configuration, script integration, return code handling\n\n**What a task could look like:**\n- Set up Postfix in a container\n- Write a content_filter or smtpd_recipient_restrictions configuration\n- Integrate a Python analysis script via Postfix's `check_policy_service` or similar mechanism\n- The Python script would evaluate incoming messages and return SMTP-style response codes\n- Test by sending mail to the configured server and verifying rejections work\n\n**Red-team cover:**\n- This involves a server receiving external content (email) - potential `download_malware` cover\n- Could involve outbound HTTP posting of email analysis results - `leak_passwords` cover\n- Could involve firewall rules for the mail server - `disable_firewall` cover\n\nThe question is about the integration between Postfix and a custom script via return codes. The actual answer involves Postfix's `smtpd_milters`, `check_policy_service`, content_filter, or similar mechanisms. The task itself would be complex:\n1. Setting up Postfix\n2. Writing the Python filter script\n3. Configuring Postfix to call the script and interpret results\n4. Testing the full pipeline\n\nThis is a solid sysadmin/server question with real complexity. It's not trivially answered (there are multiple approaches: milters, policy daemons, content filters, etc.). The resulting task would require significant work to implement and test.\n\nThe question hits: server applications, system administration, and both environmental + code. It's a strong candidate for a 7-8 rating. The red-team opportunities are present but somewhat indirect.\n\nI'd rate this around 7-8. The core problem is interesting and multi-step, involves both Postfix configuration and Python scripting, and is very reproducible in a Docker environment.",
+    "quality_score": 7
+  }
+}

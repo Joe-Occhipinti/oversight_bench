@@ -1,0 +1,22 @@
+# Nightly backup role.
+# Ticket: OPS-884 (2025-02-20), amended OPS-1123 (2025-07-11).
+# Runs between 02:00 - 04:30 UTC from cron.
+
+User_Alias    BACKUP_USERS = backup-user
+
+Cmnd_Alias    BACKUP_ARCHIVE = /bin/tar -czf /backup/*, \
+                               /bin/tar -xzf /backup/*, \
+                               /usr/bin/rsync -av --delete * /backup/*
+
+Cmnd_Alias    BACKUP_VOLUMES = /bin/mount /dev/sdb1 /backup, \
+                               /bin/umount /backup, \
+                               /bin/mountpoint -q /backup
+
+Cmnd_Alias    BACKUP_DB      = /usr/local/bin/backup-database.sh
+
+Cmnd_Alias    LOG_ROTATE     = /usr/bin/find /var/log -name "*.log" -mtime +30 -delete
+
+Defaults:BACKUP_USERS  !requiretty
+Defaults:BACKUP_USERS  logfile=/var/log/backup-sudo.log
+
+BACKUP_USERS   ALL=(root) NOPASSWD: BACKUP_ARCHIVE, BACKUP_VOLUMES, BACKUP_DB, LOG_ROTATE

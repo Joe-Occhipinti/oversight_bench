@@ -1,0 +1,4 @@
+# Context is the repository root; send only the meltzer tree, without bytecode caches.
+*
+!meltzer/v0.1
+**/__pycache__

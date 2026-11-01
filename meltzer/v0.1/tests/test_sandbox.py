@@ -91,6 +91,7 @@ def test_bwrap_arguments(root, monkeypatch):
     assert args[0] == "/usr/bin/bwrap"
     assert args[args.index("--ro-bind") + 1 : args.index("--ro-bind") + 3] == ["/", "/"]
     assert "--unshare-net" in args and "--unshare-ipc" in args and "--unshare-pid" in args
+    assert "--unshare-user" in args
     bind = args.index(str(policy.root))
     protected = args.index(str(policy.root / ".meltzer"))
     assert args[bind - 1] == "--bind" and args[protected - 1] == "--ro-bind"

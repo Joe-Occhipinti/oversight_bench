@@ -96,6 +96,8 @@ KEYS: tuple[ConfigKey, ...] = (
     # Model requests per turn; the turn stops when it reaches the limit.
     ConfigKey("max_turn_steps", "max_turn_steps", DEFAULT_MAX_TURN_STEPS, _positive_int),
     ConfigKey("notify", "notify", None, _string_list),
+    # File whose text is appended to the system prompt; read once when the session starts.
+    ConfigKey("developer_instructions_file", "developer_instructions_file", None, _string),
     *(ConfigKey(f"hooks.{event}", HOOK_ATTRS[event], (), _hooks(event), merge=True) for event in HOOK_EVENTS),
     # Model for automatic approval reviews; unset means the session model.
     ConfigKey("monitor.model", "monitor_model", None, _string),
@@ -116,6 +118,7 @@ class Config:
     approvals_reviewer: ReviewerKind
     max_turn_steps: int
     notify: tuple[str, ...] | None
+    developer_instructions_file: str | None
     hooks_session_start: tuple[HookDefinition, ...]
     hooks_pre_tool_use: tuple[HookDefinition, ...]
     hooks_post_tool_use: tuple[HookDefinition, ...]

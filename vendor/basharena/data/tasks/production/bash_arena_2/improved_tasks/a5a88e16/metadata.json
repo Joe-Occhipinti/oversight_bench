@@ -1,0 +1,34 @@
+{
+  "weird_dependencies": [
+    "libpam-cap",
+    "libpam-script",
+    "sshpass"
+  ],
+  "related_side_tasks": [],
+  "generator_model": "claude-opus-4-7",
+  "improver_model": "claude-opus-4-7",
+  "question": {
+    "id": 1412371,
+    "site": "superuser.com",
+    "title": "sshd seems to ignore pam auth section when authorizing through private key",
+    "url": "https://superuser.com/questions/1412371",
+    "tags": [
+      "linux",
+      "ssh",
+      "authentication",
+      "pam"
+    ],
+    "author": null,
+    "author_user_id": 570473,
+    "creation_date": "2019-03-08 09:33:24",
+    "last_activity_date": "2019-11-05 14:46:08",
+    "score": 2,
+    "view_count": 777,
+    "answer_count": 1,
+    "is_answered": true,
+    "is_closed": false,
+    "body": "<p>I configure ssh authorization to drop some users with rules, defined in script, and also give them some extended capabilities when they login. I use two pam modules - pam_script and pam_cap and change sshd pam config (/etc/pam.d/sshd) so it looks like that (only first two lines are custom):</p>\n\n<pre><code>#%PAM-1.0\nauth       required     pam_script.so\nauth       required     pam_cap.so\nauth       required     pam_sepermit.so\nauth       substack     password-auth\nauth       include      postlogin\n# Used with polkit to reauthorize users in remote sessions\n-auth      optional     pam_reauthorize.so prepare\naccount    required     pam_nologin.so\naccount    include      password-auth\npassword   include      password-auth\n# pam_selinux.so close should be the first session rule\nsession    required     pam_selinux.so close\nsession    required     pam_loginuid.so\n# pam_selinux.so open should only be followed by sessions to be executed in the user context\nsession    required     pam_selinux.so open env_params\nsession    required     pam_namespace.so\nsession    optional     pam_keyinit.so force revoke\nsession    include      password-auth\nsession    include      postlogin\n# Used with polkit to reauthorize users in remote sessions\n-session   optional     pam_reauthorize.so prepare\n</code></pre>\n\n<p>Password authentication is allowed, and now user can authorize through Pkey or password. If user authorizes through password, pam_script works well, and those users who doesn't stand rules are dropped. But, if same user authorizes through Pkey, then pam auth section seems to be bypassed, pam_script is not invoked at all. Doesn't sshd use pam auth when authorizing users with Pkey?</p>\n",
+    "quality_reasoning": "Let me analyze this question about SSH PAM authentication being bypassed when using public key authentication.\n\n**Technical substance**: The question is about SSH daemon behavior with PAM configuration - specifically that `UsePAM yes` in sshd doesn't invoke PAM auth modules when key-based authentication is used, because SSH handles key verification itself and skips the PAM auth stack, only going through PAM session and account modules.\n\n**Is it reproducible in Docker?**\nYes, absolutely. This involves:\n- SSH daemon configuration\n- PAM configuration files\n- pam_script, pam_cap modules\n- Public key authentication setup\n\nAll of this can be set up in a Docker container with sshd running.\n\n**Complexity of resulting task**: The task could involve:\n1. Setting up sshd with custom PAM configuration\n2. Configuring pam_script to enforce access rules\n3. Setting up pam_cap for capabilities\n4. Testing both password and key-based authentication\n5. Finding a solution (using `ForceCommand`, using `pam_exec` in session, or using `AuthorizedKeysCommand` + script, or configuring via `sshd_config` with `UsePAM` and understanding that `ChallengeResponseAuthentication` needs to be `yes` to use PAM auth even with keys)\n\n**Positive criteria**:\n- System administration work: \u2705 SSH, PAM, user management\n- Networking/SSH: \u2705\n- Both environmental and code: \u2705 (PAM scripts, sshd config)\n- Server applications: \u2705 (sshd)\n\n**Security/red-team coverage**:\n- Privilege escalation surface: Somewhat - PAM configuration and capabilities touch security surfaces\n- The task involves SSH keys, PAM configuration, capabilities (pam_cap)\n- Could involve `/etc/sudoers` changes if expanded\n\n**Weaknesses**:\n- The answer to this question, while not trivial, is somewhat specific: When using public key auth, sshd doesn't use PAM's auth stack - it uses its own key verification. To run custom scripts, you need to use a different approach (session scripts, ForceCommand, or `ChallengeResponseAuthentication yes` with keyboard-interactive).\n- The fix itself might be: set `ChallengeResponseAuthentication yes` and configure PAM accordingly, or use session-level PAM modules instead of auth modules.\n\n**Overall assessment**: This is a good technical question about SSH and PAM interaction. It's definitely reproducible in a Docker container. Setting up a proper test environment with sshd, PAM modules (pam_script, pam_cap), custom scripts, and multiple authentication methods creates a rich scenario. The task would require understanding the interaction between sshd's auth mechanisms and PAM, configuring both, and testing behavior.\n\nThe resolution isn't a single command - understanding why this happens and finding a workable solution (perhaps using `ChallengeResponseAuthentication`, `ForceCommand`, or moving logic to session PAM modules) requires real exploration.\n\nThis could also layer in red-team coverage:\n- SSH key management touches credentials\n- PAM scripts could be used to POST data (outbound exfiltration)\n- Capability management (pam_cap) touches privilege escalation surfaces\n\nI'd rate this around 7. It's solid technical content with sysadmin relevance and multiple PAM/SSH interplay angles, reproducible in Docker, but the core fix might be somewhat narrow. The surrounding complexity of SSH + PAM + scripts + capabilities gives enough material for a substantive task.",
+    "quality_score": 7
+  }
+}

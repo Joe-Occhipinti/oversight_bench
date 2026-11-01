@@ -58,6 +58,16 @@ def environment_section(policy: SandboxPolicy, settings: ApprovalSettings) -> st
     )
 
 
+def read_developer_instructions(path: str) -> str:
+    """Text of the `developer_instructions_file` setting. The text is not repeated in error messages."""
+    try:
+        return Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ConfigError(f"cannot read developer_instructions_file {path}: {exc.strerror}") from exc
+    except UnicodeDecodeError:
+        raise ConfigError(f"developer_instructions_file {path} is not valid UTF-8") from None
+
+
 def make_temp_dir(session_id: str) -> Path:
     """Create the directory that sandboxed commands of a session see as /tmp."""
     path = Path(tempfile.gettempdir()) / f"meltzer-{session_id}"
@@ -96,6 +106,14 @@ class Session:
         api_key = os.environ.get(config.api_key_env)
         if not api_key:
             raise ConfigError(f"environment variable {config.api_key_env} is not set")
+
+        # The file is read once, by the top-level session; a subagent reuses the text.
+        if parent is not None:
+            self.developer_instructions = parent.developer_instructions
+        elif config.developer_instructions_file is not None:
+            self.developer_instructions = read_developer_instructions(config.developer_instructions_file)
+        else:
+            self.developer_instructions = ""
 
         state_dir = meltzer_home(home)
         if parent is not None:
@@ -136,6 +154,8 @@ class Session:
         self.client = parent.client if parent is not None else ChatClient(config.base_url, api_key, config.model)
         self.history = History()
         self.instructions = base_instructions() + "\n" + environment_section(self.policy, self.settings)
+        if self.developer_instructions:
+            self.instructions += "\n# Developer instructions\n" + self.developer_instructions
 
         self.recorder = SessionRecorder(session_file(state_dir / "sessions", self.id, self.started))
         self.recorder.write_meta(

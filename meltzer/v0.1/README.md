@@ -139,6 +139,7 @@ Settings are read when a session starts, from these layers (later wins):
 | `monitor.transcript_items` | `40` | transcript length of monitor reviews |
 | `max_turn_steps` | `100` | model requests per turn |
 | `notify` | none | program to run when a turn completes |
+| `developer_instructions_file` | none | file whose text is appended to the system prompt |
 | `hooks.<Event>` | none | see [Hooks](#hooks) |
 
 Example `~/.meltzer/config.toml`:

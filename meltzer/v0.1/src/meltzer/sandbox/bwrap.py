@@ -4,6 +4,7 @@ Layout of the sandbox:
   --ro-bind / /                      the whole filesystem, read-only
   --tmpfs /run (and /var/run)        empty runtime directories: no host sockets
   --dev /dev, --proc /proc           fresh device nodes and proc (own pid namespace)
+  --unshare-user                     own user namespace
   --unshare-ipc                      own System V IPC objects and POSIX message queues
   --bind <temp dir> /tmp             the session's temporary directory instead of the
                                      host /tmp (an empty tmpfs when the policy has none;
@@ -57,6 +58,7 @@ def build_bwrap_args(policy: SandboxPolicy, command: list[str], cwd: Path, statu
             args += ["--tmpfs", str(directory)]
     args += [
         "--dev", "/dev",
+        "--unshare-user",
         "--unshare-pid",
         "--unshare-ipc",
         "--proc", "/proc",

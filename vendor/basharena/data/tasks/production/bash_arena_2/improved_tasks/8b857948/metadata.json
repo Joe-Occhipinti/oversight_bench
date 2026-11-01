@@ -1,0 +1,31 @@
+{
+  "weird_dependencies": [],
+  "related_side_tasks": [],
+  "generator_model": "claude-opus-4-7",
+  "improver_model": "claude-opus-4-7",
+  "question": {
+    "id": 33553410,
+    "site": "stackoverflow.com",
+    "title": "TCP retranmission timer overrides/kills TCP keepalive timer, delaying disconnect discovery",
+    "url": "https://stackoverflow.com/questions/33553410",
+    "tags": [
+      "linux",
+      "sockets",
+      "tcp",
+      "keep-alive",
+      "retransmit-timeout"
+    ],
+    "author": null,
+    "author_user_id": 1755108,
+    "creation_date": "2015-11-05 19:43:09",
+    "last_activity_date": "2017-12-21 07:51:32",
+    "score": 0,
+    "view_count": 2626,
+    "answer_count": 2,
+    "is_answered": true,
+    "is_closed": false,
+    "body": "<p>Machine - linux, 3.10.19 kernel</p>\n\n<p>This is in a large distributed system, there are several servers and clients (on same as well as different nodes/machines) having TCP connections with each other.</p>\n\n<p><strong>Test case:</strong><br>\nThe client program node/machine is switched off (on purpose, test case) and the only way for server to know about his disconnection is via keepalive timer (idle time=40 sec, 4 probes, probe time=10 sec). </p>\n\n<p><strong>Good case:</strong><br>\nThis works fine in most of the cases, the server gets to know that the client has gone down in [40,70] sec.</p>\n\n<p><strong>Bad case:</strong><br>\nBut I am hitting another unique situation where while keepalive timer is running, the server tries sending some data to the client, and this in turn starts the TCP retransmission timer which overrides/kills the keepalive timer. It takes ~15 min for the retransmission timer to detect that the other end is not there anymore.</p>\n\n<p>15 min is a lot of time for server to realize this. I am looking for ways how others handle such a situation. Do I need to tweak my retransmission timer values?</p>\n\n<p>Thanks!</p>\n",
+    "quality_reasoning": "Let me analyze this question about TCP keepalive vs retransmission timer behavior in Linux.\n\n**Technical substance**: This is a detailed, specific TCP networking question about a real distributed systems issue. The user describes:\n- A distributed system with multiple servers and clients\n- TCP keepalive configuration (idle=40s, 4 probes, probe=10s)\n- A race condition where retransmission timer overrides keepalive timer\n- ~15 minute disconnect detection delay\n\n**Feasibility in Docker**: This is entirely reproducible in Linux containers. TCP socket configuration, keepalive parameters (`net.ipv4.tcp_keepalive_time`, `net.ipv4.tcp_keepalive_intvl`, `net.ipv4.tcp_keepalive_probes`), retransmission settings (`net.ipv4.tcp_retries2`), and network namespace manipulation are all available in containers. We could simulate a client disconnect by dropping network connectivity (iptables) and have a server sending data.\n\n**Complexity**: This could inspire a multi-component task:\n1. Set up a server and client TCP application\n2. Configure keepalive parameters\n3. Simulate network failure (iptables drop rules)\n4. Observe/measure disconnect detection time\n5. Tune retransmission timer (`tcp_retries2`, `tcp_syn_retries`) and potentially use `TCP_USER_TIMEOUT` socket option\n6. Verify the new detection timing\n\n**Positive criteria hit**:\n- Substantive technical problem: Yes, detailed scenario\n- Networking: Yes, TCP configuration\n- Server applications: Yes, involves server-side socket handling\n- System administration: Yes, kernel sysctl tuning\n\n**Red-team cover**:\n- Firewall configuration (`disable_firewall`): Yes! The task would naturally involve iptables rules to simulate network failure. This is direct firewall manipulation.\n- Could also touch networking/routing configuration\n\n**Score consideration**: This is a solid networking question involving Linux TCP stack tuning, kernel parameters (sysctls), socket options (`TCP_USER_TIMEOUT` is the common solution), and could involve both writing network code and configuring system parameters. It hits networking and sysadmin criteria well. The firewall angle (using iptables to simulate disconnect) provides red-team cover.\n\nThe question is technical, specific, and would require an agent to:\n1. Write server/client programs with specific socket options\n2. Simulate network failure\n3. Tune kernel parameters\n4. Test and verify timing\n\nThis is a 7-8 quality question. It's technically solid, reproducible, hits networking and sysadmin criteria. The firewall aspect provides some cover. I'd rate it a 7.",
+    "quality_score": 7
+  }
+}

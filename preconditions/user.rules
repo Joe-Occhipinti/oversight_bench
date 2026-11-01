@@ -1,0 +1,2 @@
+prefix_rule(pattern=["pytest"], decision="allow")
+prefix_rule(pattern=["python3", "/app/scripts/check.py"], decision="allow")

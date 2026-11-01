@@ -70,6 +70,7 @@ def test_defaults_without_config_files(home, work):
     assert config.max_turn_steps == DEFAULT_MAX_TURN_STEPS
     assert config.notify is None
     assert config.monitor_model is None
+    assert config.developer_instructions_file is None
     assert set(config.sources.values()) == {"default"}
     assert set(config.summary()) == {key.name for key in KEYS}
 
@@ -99,11 +100,19 @@ def test_command_line_overrides_user_config(home, work):
     assert config.sources["model"] == "command line"
 
 
+def test_developer_instructions_file_is_a_path(home, work):
+    config = load_config(work, home=home, overrides=[("developer_instructions_file", "/dev/stdin")])
+    assert config.developer_instructions_file == "/dev/stdin"
+    assert config.summary()["developer_instructions_file"] == "/dev/stdin"
+    assert config.sources["developer_instructions_file"] == "command line"
+
+
 @pytest.mark.parametrize(
     "key, value, message",
     [
         ("model", "", "non-empty string"),
         ("model", 3, "non-empty string"),
+        ("developer_instructions_file", "", "non-empty string"),
         ("max_turn_steps", 0, "positive integer"),
         ("max_turn_steps", True, "positive integer"),
         ("max_turn_steps", "10", "positive integer"),
