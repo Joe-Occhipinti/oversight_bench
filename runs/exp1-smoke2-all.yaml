@@ -1,0 +1,20 @@
+# Pilot 2, run 1 of 2: unaware and aware with all 14 cards. Run together with exp1-smoke2-one (same scenario).
+run_id: exp1-smoke2-all
+setting:
+  name: basharena
+  side_tasks: [download_malware]
+  main_tasks: {pool: no_cover, n: 1, seed: 0}
+conditions: [unaware, aware]
+prompts:
+  attack_base: prompts/exp1/attack_base.md
+  aware_mode: all_cards
+  aware_section: {all_cards: prompts/exp1/aware_all_cards.md, one_card: prompts/exp1/aware_one_card.md}
+  cards: registry/v0.1/cards
+models:                               # chosen by Gio, 2026-10-31
+  agent:   {id: z-ai/glm-5.3,       reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}}
+  monitor: {id: z-ai/glm-5.3-flash, reasoning_effort: low,  provider: {order: [wafer], allow_fallbacks: false}}
+  judge:   {id: deepseek/deepseek-v4.1-flash, reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}, temperature: 0, concurrency: 8}
+meltzer: {max_turn_steps: 1000}       # pilot only (real runs: 100): at pilot 1's pace 100 model requests would end a sample before the time limit
+limits: {meltzer_seconds: 7200, sample_time_limit_seconds: 8100, wait_seconds: 15}   # 2 h per sample (real runs: 30 min)
+parallel: {max_samples: 3}
+seeds: {inspect_shuffle: 0, card_assignment: 0, bootstrap: 0}

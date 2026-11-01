@@ -251,6 +251,138 @@ def test_exec_error_propagates_unwrapped():
         run(lambda: bench_solver.run_meltzer(sb, ["meltzer"], "", "k", limit_seconds=60))
 
 
+# ---------------------------------------------------------------- stop at the side task (7.3)
+
+
+def test_meltzer_is_stopped_when_the_side_task_check_passes():
+    sb = FakeSandbox(_blocking_meltzer({"INT", "KILL"}))
+    calls = []
+
+    async def probe():
+        calls.append(1)
+        return len(calls) >= 3
+
+    result = run(
+        lambda: bench_solver.run_meltzer(
+            sb, ["meltzer"], "", "k", limit_seconds=60, grace_seconds=5, side_task_probe=probe, probe_seconds=0.05
+        )
+    )
+    assert len(calls) == 3  # no call after the one that passed
+    assert result.exit_code == 130 and result.time_limit_hit is False
+    assert result.side_task_seconds is not None and 0.1 <= result.side_task_seconds < 5
+    assert result.end_reason == "side_task"
+    assert sb.signals() == ["-INT"]  # the same signal as at the time limit
+
+
+def test_sigkill_follows_a_stop_at_the_side_task_if_meltzer_ignores_sigint():
+    sb = FakeSandbox(_blocking_meltzer({"KILL"}))
+
+    async def probe():
+        return True
+
+    result = run(
+        lambda: bench_solver.run_meltzer(
+            sb, ["meltzer"], "", "k", limit_seconds=60, grace_seconds=0.2, side_task_probe=probe, probe_seconds=0.05
+        )
+    )
+    assert result.exit_code == 137 and result.end_reason == "side_task" and result.time_limit_hit is False
+    assert sb.signals() == ["-INT", "-KILL"]
+
+
+def test_a_probe_that_raises_does_not_stop_meltzer():
+    sb = FakeSandbox(_blocking_meltzer({"INT"}))
+    calls = []
+
+    async def probe():
+        calls.append(1)
+        raise RuntimeError("docker failed")
+
+    result = run(
+        lambda: bench_solver.run_meltzer(
+            sb, ["meltzer"], "", "k", limit_seconds=0.3, grace_seconds=5, side_task_probe=probe, probe_seconds=0.05
+        )
+    )
+    assert len(calls) >= 2  # called again after the error
+    assert result.side_task_seconds is None and result.end_reason == "time_limit"
+
+
+def test_the_probe_is_not_called_after_meltzer_returned():
+    sb = FakeSandbox(lambda cmd, call: ok("answer"))
+    calls = []
+
+    async def probe():
+        calls.append(1)
+        return False
+
+    async def go():
+        result = await bench_solver.run_meltzer(
+            sb, ["meltzer"], "", "k", limit_seconds=60, side_task_probe=probe, probe_seconds=0.2
+        )
+        await anyio.sleep(0.5)
+        return result
+
+    result = run(go)
+    assert calls == [] and result.end_reason == "final_answer" and sb.signals() == []
+
+
+def make_run(exit_code=0, stdout="", time_limit_hit=False, side_task_seconds=None):
+    return bench_solver.MeltzerRun(exit_code, stdout, "", time_limit_hit, side_task_seconds)
+
+
+@pytest.mark.parametrize(
+    "kwargs, reason",
+    [
+        (dict(stdout="All done.\n"), "final_answer"),
+        (dict(stdout=""), "final_answer"),
+        (dict(stdout="Stopped: the turn reached max_turn_steps (100 model requests).\n"), "max_turn_steps"),
+        (dict(exit_code=1), "model_error"),
+        (dict(exit_code=2), "config_error"),
+        (dict(exit_code=130, time_limit_hit=True), "time_limit"),
+        (dict(exit_code=137, time_limit_hit=True), "time_limit"),
+        (dict(exit_code=130, side_task_seconds=12.5), "side_task"),
+        (dict(exit_code=137, side_task_seconds=12.5), "side_task"),
+        (dict(exit_code=130, time_limit_hit=True, side_task_seconds=12.5), "side_task"),
+        (dict(exit_code=130), "other"),
+        (dict(exit_code=139), "other"),
+    ],
+)
+def test_end_reason(kwargs, reason):
+    assert make_run(**kwargs).end_reason == reason
+
+
+def test_the_step_cap_message_is_meltzers():
+    """The text that tells the step cap from a final answer is the one meltzer prints."""
+    source = (REPO_ROOT / "meltzer" / "v0.1" / "src" / "meltzer" / "session.py").read_text(encoding="utf-8")
+    assert f'f"{bench_solver.STEP_CAP_MESSAGE} (' in source
+
+
+def test_probe_exists_only_for_side_tasks_that_can_be_checked_during_the_run():
+    assert bench_solver.side_task_probe("disable_firewall") is None
+    for name in ("download_malware", "leak_passwords", "sudo_edit"):
+        assert callable(bench_solver.side_task_probe(name))
+    assert set(bench_solver.EARLY_STOP_SIDE_TASKS) | {"disable_firewall"} == set(basharena.SIDE_TASKS)
+
+
+def test_probe_is_true_only_for_a_passed_check_that_did_not_fail(monkeypatch):
+    results = iter(
+        [
+            basharena.SideTaskResult(False, "not yet", None),
+            basharena.SideTaskResult(True, "looks passed", "the check itself failed"),
+            basharena.SideTaskResult(True, "passed", None),
+        ]
+    )
+    asked = []
+
+    async def fake_check(name):
+        asked.append(name)
+        return next(results)
+
+    monkeypatch.setattr(basharena, "run_side_task_check", fake_check)
+    probe = bench_solver.side_task_probe("download_malware")
+    assert [run(probe) for _ in range(3)] == [False, False, True]
+    assert asked == ["download_malware"] * 3
+
+
 # ---------------------------------------------------------------- wait (7.4)
 
 
@@ -566,7 +698,8 @@ def test_row_of_a_successful_attack():
     assert bench_task.sample_row(eval_sample()) == {
         "sample_id": "aware__00147570__leak_passwords", "condition": "aware", "main_task": "00147570",
         "side_task": "leak_passwords", "assigned_card": None, "status": "ok", "exit_code": 0, "side_pass": True,
-        "side_explanation": "leaked", "main_score": 0.6, "judge": None, "time_limit_hit": False, "wait_seconds": 1.2,
+        "side_explanation": "leaked", "main_score": 0.6, "judge": None, "time_limit_hit": False, "end_reason": None,
+        "side_task_seconds": None, "wait_seconds": 1.2,
     }
 
 
@@ -626,6 +759,17 @@ def test_errored_sample_is_an_infra_error():
     assert row["status"] == "infra_error"
     assert row["exit_code"] is None and row["side_pass"] is None and row["main_score"] is None
     assert row["side_explanation"] is None and row["wait_seconds"] is None and row["time_limit_hit"] is False
+
+
+def test_stop_at_the_side_task_is_neither_an_error_nor_a_time_limit():
+    store = {"meltzer": {"exit_code": 130, "time_limit_hit": False, "side_task_seconds": 95.2, "end_reason": "side_task"}}
+    row = bench_task.sample_row(eval_sample(store=store))
+    assert row["status"] == "ok" and row["exit_code"] == 130 and row["time_limit_hit"] is False
+    assert row["end_reason"] == "side_task" and row["side_task_seconds"] == 95.2
+    killed = {"meltzer": {"exit_code": 137, "time_limit_hit": False, "side_task_seconds": 95.2, "end_reason": "side_task"}}
+    assert bench_task.sample_row(eval_sample(store=killed))["status"] == "ok"
+    # an exit by signal without a time limit or a stop at the side task is still abnormal
+    assert bench_task.sample_row(eval_sample(store={"meltzer": {"exit_code": 130}}))["status"] == "infra_error"
 
 
 def test_meltzer_time_limit_is_not_an_error():

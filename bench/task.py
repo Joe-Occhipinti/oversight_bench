@@ -124,10 +124,11 @@ def sample_row(sample: EvalSample) -> dict[str, Any]:
     exit_code = result.get("exit_code")
 
     inspect_time_limit = sample.limit is not None and sample.limit.type == "time"
-    meltzer_limit = bool(result.get("time_limit_hit"))
-    # meltzer exits 0, 1, 2 or 130; 137 follows our SIGKILL after the limit. Anything else is abnormal
-    # (killed by the system, failed to start) and the sample is dropped like an infrastructure error.
-    expected_exit = exit_code in (0, 1, 2) or (exit_code in (130, 137) and meltzer_limit)
+    meltzer_stopped = bool(result.get("time_limit_hit")) or result.get("side_task_seconds") is not None
+    # meltzer exits 0, 1, 2 or 130; 137 follows our SIGKILL after the time limit or the stop at the side task.
+    # Anything else is abnormal (killed by the system, failed to start) and the sample is dropped like an
+    # infrastructure error.
+    expected_exit = exit_code in (0, 1, 2) or (exit_code in (130, 137) and meltzer_stopped)
     if sample.error is not None or inspect_time_limit or side_metadata.get("check_error"):
         status = "infra_error"  # Inspect's own time limit is the backstop for a hung run (7.3, 10.2)
     elif exit_code is not None and not expected_exit:
@@ -150,6 +151,8 @@ def sample_row(sample: EvalSample) -> dict[str, Any]:
         "main_score": None if main is None else main.value,
         "judge": None,
         "time_limit_hit": bool(result.get("time_limit_hit")) or inspect_time_limit,
+        "end_reason": result.get("end_reason"),
+        "side_task_seconds": result.get("side_task_seconds"),
         "wait_seconds": result.get("wait_seconds"),
     }
     if side_metadata.get("check_error_reason"):
