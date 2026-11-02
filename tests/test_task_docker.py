@@ -14,6 +14,8 @@ while meltzer waits for its answer. Stacks run one at a time.
    `shell sleep 5`; the check, run every 3 s here, stops meltzer with exit 130 and the row says so.
 5. `subagent`: the agent calls `spawn_agent`; the subagent's system message has no developer instructions,
    the main session's has them.
+6. `pkill`: while meltzer runs, a command kills the processes whose command line matches a phrase of the task
+   (`pkill -f`, as an agent does for the service its task is about); meltzer must survive.
 
 Needs Docker, the images (built on first use), network access for the first build and the `openai` package.
 """
@@ -138,6 +140,13 @@ async def subagent_script(agent: Agent, n: int) -> ModelOutput:
     return answer(SUBAGENT_ANSWER if n == 2 else FINAL_ANSWER)
 
 
+async def pkill_script(agent: Agent, n: int) -> ModelOutput:
+    if n == 1:  # what an escalated `pkill -f <name from the task>` does; the task text must not be on meltzer's command line
+        await sh(agent.holder["sb"], "pkill -f 'Your task is as follows'; pkill -f 'meltzer exec -C /app -c developer'; true")
+        return tool_call("shell", "t1", command="echo still alive")
+    return answer(FINAL_ANSWER)
+
+
 # ---------------------------------------------------------------- one run
 
 
@@ -254,6 +263,11 @@ def subagent(tmp_path_factory, mp, images) -> Outcome:
     return run_scenario(tmp_path_factory, mp, subagent_script)
 
 
+@pytest.fixture(scope="module")
+def pkill(tmp_path_factory, mp, images) -> Outcome:
+    return run_scenario(tmp_path_factory, mp, pkill_script)
+
+
 def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -342,8 +356,8 @@ def test_meltzer_command_line_and_environment_are_ordinary(finish):
     snapshot = finish.agent.snapshot
     assert snapshot["meltzer_pid"].isdigit()
     proc = snapshot["proc"]
-    assert "developer_instructions_file=/dev/stdin" in proc
-    assert proc.count("Your task is as follows:") == 1
+    assert "developer_instructions_file=/dev/fd/3" in proc
+    assert "Your task is as follows:" not in proc  # the task is on standard input; `pkill -f` must not find it
     assert TEXT_MARKER not in proc and AWARE_MARKER not in proc
     assert re.search(r"^MELTZER_API_KEY=sk-[A-Za-z0-9]{48}$", proc, re.MULTILINE), proc
     assert not re.search(r"inspect|da7be258|openrouter", proc, re.IGNORECASE), proc
@@ -410,4 +424,14 @@ def test_subagent_ran_and_its_answer_reached_the_main_session(subagent):
     assert len(metas) == 2 and sum("parent_session_id" in m for m in metas) == 1
     assert any(SUBAGENT_PROMPT in json.dumps(r) for r in records if r["type"] == "item" and r.get("role") == "user")
     assert any(SUBAGENT_ANSWER in json.dumps(r) for r in records if r["type"] == "item")
+
+
+# ---------------------------------------------------------------- 6. pkill by the words of the task
+
+
+def test_meltzer_survives_a_pkill_by_the_words_of_its_task(pkill):
+    (row,) = pkill.rows
+    assert row["exit_code"] == 0 and row["end_reason"] == "final_answer", row  # 143 means meltzer was killed
+    assert pkill.agent.calls == 2  # the step after the pkill still ran
+    assert (pkill.sample_dir / "stdout.txt").read_text(encoding="utf-8").strip() == FINAL_ANSWER
 

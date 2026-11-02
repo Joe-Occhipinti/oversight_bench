@@ -78,18 +78,42 @@ def test_random_api_key_format():
 
 
 def test_meltzer_command():
-    assert bench_solver.build_meltzer_command("Your task is as follows:\nfix it") == [
-        "meltzer", "exec", "-C", "/app", "-c", "developer_instructions_file=/dev/stdin",
-        "Your task is as follows:\nfix it",
+    staged = "/dev/shm/.0123456789abcdef"
+    assert bench_solver.build_meltzer_command(staged) == [
+        "bash", "-c",
+        "exec meltzer exec -C /app -c developer_instructions_file=/dev/fd/3 - "
+        f"3< <(cat {staged}; rm -f {staged})",
     ]
 
 
-def test_user_message_must_be_under_120000_bytes():
-    bench_solver.build_meltzer_command("x" * 119_999)
-    with pytest.raises(ValueError, match="120000"):
-        bench_solver.build_meltzer_command("x" * 120_000)
-    with pytest.raises(ValueError):  # bytes, not characters
-        bench_solver.build_meltzer_command("é" * 60_000)
+def test_the_command_line_holds_no_task_text_whatever_the_task():
+    """A process's command line is visible to `pkill -f`: the user message goes in on standard input."""
+    command = bench_solver.build_meltzer_command(bench_solver.stage_path())
+    assert len(" ".join(command)) < 300
+    assert " - 3<" in command[2]  # `-` is meltzer's "read the prompt from standard input"
+    assert "exec meltzer exec -C /app" in command[2]  # what the time limit's `pkill -f` and the R1 checks look for
+
+
+def test_stage_paths_are_hidden_unique_and_on_tmpfs():
+    paths = {bench_solver.stage_path() for _ in range(20)}
+    assert len(paths) == 20
+    assert all(re.fullmatch(r"/dev/shm/\.[0-9a-f]{16}", p) for p in paths)
+
+
+def test_staging_writes_the_developer_instructions_with_one_exec_and_returns_the_path():
+    sb = FakeSandbox(lambda cmd, call: ok())
+    path = run(lambda: bench_solver.stage_developer_instructions(sb, DEVELOPER_TEXT))
+    (call,) = sb.calls
+    assert call["cmd"] == ["sh", "-c", f"umask 077; cat > {path}"] and call["user"] == "root"
+    assert call["input"] == DEVELOPER_TEXT  # the text is the input, not part of the command
+    assert DEVELOPER_TEXT not in json.dumps(call["cmd"])
+    assert re.fullmatch(r"/dev/shm/\.[0-9a-f]{16}", path)
+
+
+def test_staging_failure_is_an_error_naming_the_cause():
+    sb = FakeSandbox(lambda cmd, call: ok("", 1, "cat: write error: No space left on device"))
+    with pytest.raises(RuntimeError, match="No space left"):
+        run(lambda: bench_solver.stage_developer_instructions(sb, DEVELOPER_TEXT))
 
 
 def test_model_aliases_use_the_config_ids_and_the_factory(cfg):
@@ -204,12 +228,12 @@ def test_wait_for_proxy_polls_until_it_listens_and_gives_up():
 
 def test_run_meltzer_exec_arguments():
     sb = FakeSandbox(lambda cmd, call: ok("final answer\n"))
-    command = bench_solver.build_meltzer_command("do the task")
-    result = run(lambda: bench_solver.run_meltzer(sb, command, DEVELOPER_TEXT, "sk-key", limit_seconds=60))
+    command = bench_solver.build_meltzer_command("/dev/shm/.0123456789abcdef")
+    result = run(lambda: bench_solver.run_meltzer(sb, command, "do the task", "sk-key", limit_seconds=60))
     assert result == bench_solver.MeltzerRun(0, "final answer\n", "", False)
     (call,) = sb.calls
     assert call["cmd"] == command
-    assert call["input"] == DEVELOPER_TEXT  # standard input only
+    assert call["input"] == "do the task"  # the user message is the standard input
     assert call["cwd"] == "/app" and call["user"] == "root"
     assert call["env"] == {"MELTZER_API_KEY": "sk-key"}
     assert call["timeout"] is None  # a timeout argument adds a visible `timeout` process (R1)
