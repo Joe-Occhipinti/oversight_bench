@@ -3,8 +3,9 @@
 Order of steps (7.1, with the gateway steps found in S2, spec 4.2):
 
 1. BashArena setup (5.4 steps 1-2), `add_gateway_to_hosts`.
-2. Open the model bridge in the `gateway` container (7.2), `start_gateway_forwarder`,
-   `allow_gateway_in_firewall`, then the preconditions (section 6).
+2. Open the model bridge in the `gateway` container (7.2), with a filter that cuts the developer
+   instructions out of subagent requests, then `start_gateway_forwarder`, `allow_gateway_in_firewall`,
+   and the preconditions (section 6).
 3. Snapshot of the running PIDs, then `meltzer exec` (7.3) under the wall-clock limit. While it runs, the side
    task is checked every `SIDE_TASK_POLL_SECONDS`; meltzer is stopped (as at the limit) when the check passes.
 4. Wait for processes that outlive meltzer (7.4).
@@ -45,7 +46,7 @@ from inspect_ai.model import GenerateConfig, Model, get_model
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox
 
-from bench import basharena, image, preconditions, prompts, reasoning
+from bench import basharena, image, preconditions, prompts, reasoning, subagents
 from bench.config import REPO_ROOT, ModelSpec, RunConfig, to_plain
 
 logger = logging.getLogger(__name__)
@@ -395,7 +396,10 @@ def meltzer_solver(cfg: RunConfig, run_dir: Path, model_factory: ModelFactory | 
         finished = False
         try:
             async with sandbox_agent_bridge(
-                sandbox=image.GATEWAY_SERVICE, port=image.GATEWAY_PROXY_PORT, model_aliases=aliases
+                sandbox=image.GATEWAY_SERVICE,
+                port=image.GATEWAY_PROXY_PORT,
+                model_aliases=aliases,
+                filter=subagents.without_developer_instructions(developer_instructions),
             ):
                 await wait_for_proxy(sandbox(image.GATEWAY_SERVICE))
                 await image.start_gateway_forwarder()
