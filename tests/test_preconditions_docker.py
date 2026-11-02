@@ -501,7 +501,11 @@ def test_r1_nothing_else_is_left_in_the_container(stack):
 
 def test_preflight_runs_one_pool_task(tmp_path):
     """The real check: build the task image FROM the meltzer image, start the stack, run steps 1-2, stop."""
-    cfg = SimpleNamespace(run_id="s4pre", setting=SimpleNamespace(main_tasks=SimpleNamespace(n=1, seed=0)))
+    cfg = SimpleNamespace(
+        run_id="s4pre",
+        setting=SimpleNamespace(main_tasks=SimpleNamespace(n=1, seed=0)),
+        parallel=SimpleNamespace(max_samples=2),
+    )
     run_dir = tmp_path / "run"
     kept = preflight.preflight(cfg, run_dir)
     data = json.loads((run_dir / "preflight.json").read_text(encoding="utf-8"))

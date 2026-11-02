@@ -3,7 +3,10 @@
 `preflight(cfg, run_dir)` walks the pool in the order fixed by `main_tasks.seed`. For each task it
 builds the task image `FROM` the meltzer image, starts the task's compose stack (with the gateway
 service), runs steps 1-2 of the environment setup (5.4) and stops the stack. The first
-`main_tasks.n` tasks that pass are kept. The result is written to `<run_dir>/preflight.json`:
+`main_tasks.n` tasks that pass are kept. The tasks are checked in batches, several at a time, each in its
+own worker process (`process_batch`; at most `PREFLIGHT_MAX_WORKERS`, and `parallel.max_samples`): a batch
+is the next tasks still needed, so the checked tasks are the same as when checking them one by one. The
+result is written to `<run_dir>/preflight.json`:
 
     {"kept": [<task ids in order>], "skipped": [{"task_id": ..., "error": ...}]}
 
@@ -15,11 +18,14 @@ end: a run refuses to start in a results folder that holds anything but `preflig
 
 from __future__ import annotations
 
+import functools
 import json
+import multiprocessing
 import shutil
 import sys
 import tempfile
 from collections.abc import Callable
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -34,25 +40,74 @@ ERROR_CHARS = 2000
 # Covers the stack start and the two setup steps (each limited to 300 s by `run_environment_setup`).
 SAMPLE_TIME_LIMIT_SECONDS = 1200
 
+# At most this many tasks are checked at once: each check builds an image (CPU and network) and starts a stack.
+PREFLIGHT_MAX_WORKERS = 8
+
 # Checks one task; returns None when it passes, else the error text.
 TaskCheck = Callable[[str], "str | None"]
+# Checks several tasks; returns their results in the order of the task ids.
+BatchRunner = Callable[[TaskCheck, "list[str]"], "list[str | None]"]
 
 
-def walk_pool(order: list[str], n: int, check_task: TaskCheck) -> tuple[list[str], list[dict]]:
-    """Check tasks in `order` until `n` pass. Returns the kept ids and the skipped `{task_id, error}`."""
+def sequential_batch(check_task: TaskCheck, task_ids: list[str]) -> list[str | None]:
+    """Check the tasks one after the other."""
+    return [check_task(task_id) for task_id in task_ids]
+
+
+def process_batch(workers: int) -> BatchRunner:
+    """A batch runner that checks the tasks in worker processes, `workers` at a time.
+
+    Each check runs its own Inspect `eval`, which keeps global state, so the checks get a process each
+    (`check_task` and its arguments must be picklable). A worker that fails gives the error text. Each finished
+    check is reported on stderr as it ends; the results are returned in the order of the task ids.
+    """
+
+    def run(check_task: TaskCheck, task_ids: list[str]) -> list[str | None]:
+        if not task_ids:
+            return []
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=min(workers, len(task_ids)), mp_context=context) as pool:
+            futures = {pool.submit(check_task, task_id): index for index, task_id in enumerate(task_ids)}
+            results: list[str | None] = [None] * len(task_ids)
+            for done, future in enumerate(as_completed(futures), start=1):
+                index = futures[future]
+                try:
+                    results[index] = future.result()
+                except Exception as exc:
+                    results[index] = f"worker: {type(exc).__name__}: {exc}"
+                status = "ok" if results[index] is None else "failed"
+                print(f"preflight: checked {task_ids[index]}: {status} ({done}/{len(task_ids)} of this batch)", file=sys.stderr)
+        return results
+
+    return run
+
+
+def preflight_workers(cfg: Any) -> int:
+    """Tasks checked at once: the run's `parallel.max_samples`, at most `PREFLIGHT_MAX_WORKERS`."""
+    return max(1, min(cfg.parallel.max_samples, PREFLIGHT_MAX_WORKERS))
+
+
+def walk_pool(
+    order: list[str], n: int, check_task: TaskCheck, run_batch: BatchRunner = sequential_batch
+) -> tuple[list[str], list[dict]]:
+    """Check tasks in `order` until `n` pass. Returns the kept ids and the skipped `{task_id, error}`.
+
+    The tasks go to `run_batch` in batches. A batch is the next tasks still needed (n minus the kept so far),
+    so the tasks checked, and the result, are the same as when checking them one by one."""
     kept: list[str] = []
     skipped: list[dict] = []
-    for task_id in order:
-        if len(kept) >= n:
-            break
-        error = check_task(task_id)
-        if error is None:
-            kept.append(task_id)
-            print(f"preflight: {task_id} ok ({len(kept)}/{n})", file=sys.stderr)
-        else:
-            error = error[:ERROR_CHARS]
-            skipped.append({"task_id": task_id, "error": error})
-            print(f"preflight: {task_id} skipped: {error.splitlines()[0] if error else ''}", file=sys.stderr)
+    position = 0
+    while len(kept) < n and position < len(order):
+        batch = order[position : position + n - len(kept)]
+        position += len(batch)
+        for task_id, error in zip(batch, run_batch(check_task, batch)):
+            if error is None:
+                kept.append(task_id)
+                print(f"preflight: {task_id} ok ({len(kept)}/{n})", file=sys.stderr)
+            else:
+                error = error[:ERROR_CHARS]
+                skipped.append({"task_id": task_id, "error": error})
+                print(f"preflight: {task_id} skipped: {error.splitlines()[0] if error else ''}", file=sys.stderr)
     return kept, skipped
 
 
@@ -136,15 +191,15 @@ def preflight(cfg: Any, run_dir: Path, *, check_task: TaskCheck | None = None) -
     main_tasks = cfg.setting.main_tasks
     order = basharena.shuffled_pool(main_tasks.seed)
     workspaces_dir = run_dir / "workspaces"
+    run_batch = sequential_batch
     try:
         if check_task is None:
             meltzer, gateway = image.ensure_images()
-
-            def check_task_with_docker(task_id: str) -> str | None:
-                return check_task_in_stack(task_id, workspaces_dir, cfg.run_id, meltzer, gateway)
-
-            check_task = check_task_with_docker
-        kept, skipped = walk_pool(order, main_tasks.n, check_task)
+            check_task = functools.partial(
+                check_task_in_stack, workspaces_dir=workspaces_dir, run_id=cfg.run_id, meltzer=meltzer, gateway=gateway
+            )
+            run_batch = process_batch(preflight_workers(cfg))
+        kept, skipped = walk_pool(order, main_tasks.n, check_task, run_batch)
     finally:
         shutil.rmtree(workspaces_dir, ignore_errors=True)
 

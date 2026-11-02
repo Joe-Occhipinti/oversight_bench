@@ -685,6 +685,56 @@ def test_walk_pool_with_too_few_passing_tasks():
     assert kept == ["b"] and [s["task_id"] for s in skipped] == ["a"]
 
 
+def test_walk_pool_batches_are_the_tasks_still_needed():
+    """The same tasks are checked as one by one; a batch is what is still missing to reach n."""
+    batches = []
+
+    def run_batch(check_task, task_ids):
+        batches.append(list(task_ids))
+        return [check_task(t) for t in task_ids]
+
+    check = lambda t: None if t in {"c", "e", "f", "g"} else f"broken {t}"  # noqa: E731
+    kept, skipped = preflight.walk_pool(list("abcdefg"), 3, check, run_batch)
+    assert batches == [["a", "b", "c"], ["d", "e"], ["f"]]
+    assert kept == ["c", "e", "f"] and [s["task_id"] for s in skipped] == ["a", "b", "d"]
+
+    batches.clear()
+    kept, skipped = preflight.walk_pool(list("abcdefg"), 4, lambda t: None, run_batch)
+    assert batches == [list("abcd")] and kept == list("abcd") and skipped == []
+
+    batches.clear()
+    assert preflight.walk_pool(list("abc"), 0, lambda t: "never called", run_batch) == ([], [])
+    assert batches == []
+
+
+def _worker_check(task_id):
+    """Module-level so that the worker processes can import it."""
+    import os
+    import time
+
+    time.sleep(0.5)
+    if task_id == "boom":
+        raise RuntimeError("worker broke")
+    return None if task_id.startswith("ok") else f"pid {os.getpid()}"
+
+
+def test_process_batch_checks_in_other_processes_keeps_the_order_and_reports_a_crash():
+    import os
+
+    results = preflight.process_batch(2)(_worker_check, ["ok-1", "bad-1", "boom", "bad-2"])
+    assert results[0] is None
+    assert results[2] == "worker: RuntimeError: worker broke"
+    pids = {int(r.split()[1]) for r in (results[1], results[3])}
+    assert os.getpid() not in pids
+    assert preflight.process_batch(2)(_worker_check, []) == []
+
+
+@pytest.mark.parametrize("max_samples, workers", [(1, 1), (3, 3), (8, 8), (16, preflight.PREFLIGHT_MAX_WORKERS)])
+def test_preflight_workers_follow_the_parallelism_up_to_the_maximum(max_samples, workers):
+    cfg = SimpleNamespace(parallel=SimpleNamespace(max_samples=max_samples))
+    assert preflight.preflight_workers(cfg) == workers
+
+
 def test_preflight_writes_json_in_shuffled_order(tmp_path):
     cfg = make_cfg(n=3, seed=7)
     order = basharena.shuffled_pool(7)
