@@ -2,7 +2,8 @@
 
 Commands:
   run <config>         create results/<run_id>/ and run the experiment
-  resume <run_id>      continue an interrupted run from results/<run_id>/ (finished samples are kept)
+  resume <run_id>      continue an interrupted run from results/<run_id>/ (finished samples are kept;
+                       --redo-provider-failures also runs again the samples lost to a provider outage)
   preflight <config>   check the main-task pool (writes results/<run_id>/preflight.json)
   render-prompts <config>
                        write the rendered prompts of one sample per condition to
@@ -133,7 +134,13 @@ def cmd_resume(args: argparse.Namespace) -> int:
             f"running); remove them first with `uv run inspect sandbox cleanup docker`, unless another run uses them",
             file=sys.stderr,
         )
-    config.note_resume(run_dir, args.max_samples)
+    redo = None
+    if args.redo_provider_failures:
+        from bench.redo import mark_for_redo
+
+        redo = mark_for_redo(run_dir)
+        print(f"{len(redo)} samples ended because the model provider was unreachable and run again: {', '.join(redo) or '-'}")
+    config.note_resume(run_dir, args.max_samples, redo)
     return _run_and_finish(cfg, run_dir, args.max_samples)
 
 
@@ -332,6 +339,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("run_id", help="run id; reads results/<run_id>/config.yaml")
     p.add_argument(
         "--max-samples", type=int, default=None, help="parallel samples for this resume (default: the config's value)"
+    )
+    p.add_argument(
+        "--redo-provider-failures",
+        action="store_true",
+        help="also run again the finished samples whose meltzer gave up because the model provider was unreachable",
     )
     p.set_defaults(func=cmd_resume)
 

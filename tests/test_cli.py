@@ -566,6 +566,36 @@ def test_run_on_an_existing_folder_points_to_resume(results, monkeypatch, capsys
     assert "refusing to overwrite" in err and "bench resume exp1-pilot" in err
 
 
+def test_resume_with_redo_marks_the_provider_failures_first_and_notes_them(results, monkeypatch, capsys):
+    from bench import redo
+
+    run_dir = started_run(results, monkeypatch)
+    order = []
+    monkeypatch.setattr(redo, "mark_for_redo", lambda d: order.append(("mark", d)) or ["s2", "s5"])
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: order.append(("run", d)) or ["001"])
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+
+    assert main(["resume", "exp1-pilot", "--redo-provider-failures"]) == 0
+
+    assert order == [("mark", run_dir), ("run", run_dir)]  # marked before Inspect looks at the logs
+    out = capsys.readouterr().out
+    assert "2 samples" in out and "s2, s5" in out
+    entry = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["resumes"][-1]
+    assert entry["redo"] == ["s2", "s5"]
+
+
+def test_resume_without_the_flag_does_not_touch_the_logs(results, monkeypatch):
+    from bench import redo
+
+    run_dir = started_run(results, monkeypatch)
+    monkeypatch.setattr(redo, "mark_for_redo", lambda d: pytest.fail("mark_for_redo was called"))
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: ["001"])
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+    assert main(["resume", "exp1-pilot"]) == 0
+    entry = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["resumes"][-1]
+    assert "redo" not in entry
+
+
 def test_leftover_sandboxes_lists_only_inspect_containers(monkeypatch):
     out = types.SimpleNamespace(stdout="inspect-run--abc-default-1\nportainer\ninspect-run--abc-gateway-1\n")
     monkeypatch.setattr(bench_main.subprocess, "run", lambda *a, **k: out)

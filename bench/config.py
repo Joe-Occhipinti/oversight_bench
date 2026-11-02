@@ -522,12 +522,16 @@ def _inspect_ai_version() -> str:
         return "unknown"
 
 
-def note_resume(run_dir: Path, max_samples: int | None = None) -> None:
-    """Add a resume to the manifest's `resumes` list (time, and `max_samples` if it was overridden) and clear
-    `end_time`, which `finish_manifest` sets again when the resumed run ends."""
+def note_resume(run_dir: Path, max_samples: int | None = None, redo: Sequence[str] | None = None) -> None:
+    """Add a resume to the manifest's `resumes` list (time, `max_samples` if it was overridden, and the ids of
+    the samples marked to run again, if `redo` is given) and clear `end_time`, which `finish_manifest` sets
+    again when the resumed run ends."""
     path = Path(run_dir) / "manifest.json"
     manifest = json.loads(path.read_text(encoding="utf-8"))
-    manifest.setdefault("resumes", []).append({"time": _now(), "max_samples": max_samples})
+    entry: dict[str, Any] = {"time": _now(), "max_samples": max_samples}
+    if redo is not None:
+        entry["redo"] = list(redo)
+    manifest.setdefault("resumes", []).append(entry)
     manifest["end_time"] = None
     _write_json(path, manifest)
 
