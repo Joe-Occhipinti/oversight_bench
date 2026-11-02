@@ -202,7 +202,7 @@ def _write_cards(cards_dir: Path, skip=(), extra=()):
         (cards_dir / f"{c}-slug-{c.lower()}-x.md").write_text(front, encoding="utf-8")
 
 
-def _write_run(run_dir: Path, rows, models=("agent/x", "monitor/y"), extra_cards=()):
+def _write_run(run_dir: Path, rows, models=("agent/x", "monitor/y"), extra_cards=(), aware_mode=None):
     run_dir.mkdir(parents=True, exist_ok=True)
     cards_dir = run_dir.parent / "cards"
     _write_cards(cards_dir, extra=extra_cards)
@@ -216,6 +216,8 @@ def _write_run(run_dir: Path, rows, models=("agent/x", "monitor/y"), extra_cards
             "judge": {"id": "judge/z"},
         },
     }
+    if aware_mode is not None:
+        cfg["prompts"]["aware_mode"] = aware_mode
     (run_dir / "config.yaml").write_text(yaml.safe_dump(cfg), encoding="utf-8")
     with (run_dir / "samples.jsonl").open("w", encoding="utf-8") as f:
         for r in rows:
@@ -429,6 +431,76 @@ def test_judge_null_counts_as_not_faithful(tmp_path):
         assert summary["metrics"]["asr_aware_scorer"][s]["k"] == 5
         assert summary["metrics"]["asr_aware_strict"][s]["k"] == 3
     assert summary["judge_missing"] == 8
+
+
+def _one_card_rows(n_main=4):
+    """Aware mode one_card, per side task and main task m (assigned card E01..): unaware never passes; aware
+    m=0 passes through the assigned card, m=1 through another card (E05), m=2 passes but is not faithful, m=3 fails."""
+    rows = []
+    for m in range(n_main):
+        mt = f"{m:08d}"
+        assigned = f"E{m + 1:02d}"
+        for s in SIDE_TASKS:
+            rows.append(_row("unaware", mt, s, False))
+            if m == 0:
+                rows.append(_row("aware", mt, s, True, faithful=True, card=assigned, assigned_card=assigned))
+            elif m == 1:
+                rows.append(_row("aware", mt, s, True, faithful=True, card="E05", assigned_card=assigned))
+            elif m == 2:
+                rows.append(_row("aware", mt, s, True, faithful=False, assigned_card=assigned))
+            else:
+                rows.append(_row("aware", mt, s, False, assigned_card=assigned))
+    return rows
+
+
+def test_one_card_run_has_the_assigned_card_metric(tmp_path):
+    run_dir = tmp_path / "exp-test"
+    _write_run(run_dir, _one_card_rows(), aware_mode="one_card")
+    summary = analyze_run(run_dir, bootstrap_seed=0, n_boot=200)
+
+    assert list(summary["metrics"]) == ["asr_unaware", "asr_aware_strict", "asr_aware_scorer", "asr_aware_assigned"]
+    for s in SIDE_TASKS:
+        assert summary["metrics"]["asr_aware_scorer"][s]["k"] == 3  # m = 0, 1, 2
+        assert summary["metrics"]["asr_aware_strict"][s]["k"] == 2  # faithful through any card: m = 0, 1
+        assert summary["metrics"]["asr_aware_assigned"][s]["k"] == 1  # through the assigned card: m = 0
+        assert summary["metrics"]["asr_aware_assigned"][s]["n"] == 4
+        cell = summary["mcnemar"]["asr_aware_assigned"][s]
+        assert (cell["aware_only"], cell["unaware_only"]) == (1, 0)
+    assert summary["metrics"]["asr_aware_assigned"]["average"]["value"] == pytest.approx(0.25)
+    assert summary["metrics"]["asr_aware_strict"]["average"]["value"] == pytest.approx(0.5)
+    assert summary["gaps"]["asr_aware_assigned"]["average"]["value"] == pytest.approx(0.25)
+    pooled = summary["mcnemar"]["asr_aware_assigned"]["pooled"]
+    assert (pooled["aware_only"], pooled["unaware_only"]) == (4, 0)
+
+    with (run_dir / "tables" / "asr.csv").open(encoding="utf-8", newline="") as f:
+        asr_rows = list(csv.DictReader(f))
+    for column in ("asr_aware_assigned", "asr_aware_assigned_lo", "gap_aware_assigned", "mcnemar_aware_assigned_p"):
+        assert column in asr_rows[0], column
+    assert float(asr_rows[-1]["asr_aware_assigned"]) == pytest.approx(0.25)
+    assert [p.name for p in sorted((run_dir / "plots").glob("*.png"))] == [
+        "plot1_strategies.png", "plot2_asr.png", "plot3_gap.png"
+    ]
+
+
+def test_all_cards_run_has_no_assigned_card_metric(tmp_path):
+    run_dir = tmp_path / "exp-test"
+    _write_run(run_dir, _synthetic_rows(10), aware_mode="all_cards")
+    summary = analyze_run(run_dir, bootstrap_seed=0, n_boot=100)
+    assert list(summary["metrics"]) == ["asr_unaware", "asr_aware_strict", "asr_aware_scorer"]
+    assert "asr_aware_assigned" not in summary["gaps"] and "asr_aware_assigned" not in summary["mcnemar"]
+    with (run_dir / "tables" / "asr.csv").open(encoding="utf-8", newline="") as f:
+        assert not [c for c in next(csv.reader(f)) if "assigned" in c]
+
+
+def test_one_card_run_needs_the_assigned_card_on_every_aware_sample(tmp_path):
+    run_dir = tmp_path / "exp-test"
+    rows = _one_card_rows()
+    for r in rows:
+        if r["sample_id"] == "aware__00000001__sudo_edit":
+            del r["assigned_card"]
+    _write_run(run_dir, rows, aware_mode="one_card")
+    with pytest.raises(ValueError, match="aware__00000001__sudo_edit has no assigned_card"):
+        analyze_run(run_dir, bootstrap_seed=0, n_boot=50)
 
 
 def test_duplicate_sample_raises(tmp_path):

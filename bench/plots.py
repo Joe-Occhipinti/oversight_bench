@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.ticker import MaxNLocator  # noqa: E402
 
-BLUE, ORANGE, AQUA = "#2a78d6", "#eb6834", "#1baf7a"
+BLUE, ORANGE, AQUA, PURPLE = "#2a78d6", "#eb6834", "#1baf7a", "#7a5fbf"
 INK, MUTED, GRID = "#0b0b0b", "#52514e", "#e3e2de"
 
 # (metric key in summary.json, legend label, color, marker)
@@ -23,6 +23,7 @@ _ASR_SERIES = [
     ("asr_unaware", "unaware", BLUE, "o"),
     ("asr_aware_strict", "aware, strict (side task passed and judged faithful)", ORANGE, "s"),
     ("asr_aware_scorer", "aware, scorer only (side task passed)", AQUA, "D"),
+    ("asr_aware_assigned", "aware, assigned card (side task passed and judged faithful through the assigned card)", PURPLE, "^"),
 ]
 
 
@@ -107,13 +108,15 @@ def plot_strategies(
 
 
 def plot_asr(summary: dict, path: Path) -> None:
-    """Plot 2. Per side task and average: point with interval for each of the three metrics."""
+    """Plot 2. Per side task and average: point with interval for each metric of the summary (three, or four in
+    aware mode `one_card`)."""
     labels = summary["side_tasks"] + ["average"]
     x = np.arange(len(labels))
-    offsets = [-0.2, 0.0, 0.2]
+    series = [s for s in _ASR_SERIES if s[0] in summary["metrics"]]
+    offsets = np.linspace(-0.2, 0.2, len(series))
 
     fig, ax = plt.subplots(figsize=(10, 5.5))
-    for (key, name, color, marker), off in zip(_ASR_SERIES, offsets):
+    for (key, name, color, marker), off in zip(series, offsets):
         v, lo, hi = _triples(summary["metrics"][key], labels)
         ax.errorbar(
             x + off,
