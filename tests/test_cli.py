@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from bench import config
+from bench import __main__ as bench_main
 from bench.__main__ import main
 from bench.config import load_config
 
@@ -92,6 +93,9 @@ def missing_module(monkeypatch, name):
 def test_summary_prints_one_row_per_run(tmp_path, capsys):
     cfg_a = make_config(tmp_path, "run-a", name="a.yaml")
     cfg_b = make_config(tmp_path, "run-b", agent="x/other-agent", monitor="x/other-monitor", name="b.yaml")
+    data_b = yaml.safe_load(cfg_b.read_text(encoding="utf-8"))
+    data_b["prompts"]["aware_mode"] = "one_card"
+    cfg_b.write_text(yaml.safe_dump(data_b), encoding="utf-8")
     second = {
         **FULL_SUMMARY,
         "run_id": "run-b",
@@ -115,12 +119,13 @@ def test_summary_prints_one_row_per_run(tmp_path, capsys):
 
     assert len(lines) == 3  # header + two rows
     header = lines[0]
-    for col in ("run", "agent", "monitor", "n", "asr_unaware", "asr_aware_strict", "asr_aware_scorer", "gap_strict", "gap_scorer"):
+    for col in ("run", "agent", "monitor", "aware_mode", "n", "asr_unaware", "asr_aware_strict", "asr_aware_scorer", "gap_strict", "gap_scorer"):
         assert col in header
     row_a, row_b = lines[1], lines[2]
     assert row_a.startswith("run-a")
     assert "z-ai/glm-5.3" in row_a and "z-ai/glm-5.3-flash" in row_a
     assert "240" in row_a
+    assert "all_cards" in row_a and "one_card" in row_b
     assert "0.25 [0.20, 0.30]" in row_a
     assert "0.40 [0.35, 0.45]" in row_a
     assert "0.50 [0.44, 0.56]" in row_a
@@ -161,6 +166,7 @@ def test_summary_missing_keys_print_dash(tmp_path, capsys):
     out = " ".join(row)
     assert "0.50 [0.40, 0.60]" in out
     assert "0.70" in out and "0.70 [" not in out  # value without interval
+    assert "all_cards" in row  # from config.yaml
     assert row.count("-") >= 4  # n, asr_aware_scorer, gap_strict, gap_scorer
 
 
@@ -374,7 +380,7 @@ def test_preflight_exit_2_when_module_missing(results, monkeypatch, capsys):
 def test_run_dispatch_creates_folder_and_finishes_manifest(results, monkeypatch):
     calls = []
 
-    def run_experiment(cfg, run_dir):
+    def run_experiment(cfg, run_dir, max_samples=None):
         calls.append((cfg, run_dir))
         assert (run_dir / "config.yaml").is_file()
         assert (run_dir / "manifest.json").is_file()
@@ -393,7 +399,7 @@ def test_run_dispatch_creates_folder_and_finishes_manifest(results, monkeypatch)
 
 
 def test_run_sets_end_time_even_when_run_experiment_raises(results, monkeypatch):
-    def run_experiment(cfg, run_dir):
+    def run_experiment(cfg, run_dir, max_samples=None):
         raise RuntimeError("boom")
 
     fake_module(monkeypatch, "bench.task", run_experiment=run_experiment)
@@ -409,7 +415,7 @@ def _manifest_after_run(results, monkeypatch, preflight_text, returns=None):
     run_dir.mkdir()
     if preflight_text is not None:
         (run_dir / "preflight.json").write_text(preflight_text, encoding="utf-8")
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d: returns)
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: returns)
     assert main(["run", str(PILOT)]) == 0
     return json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
 
@@ -436,7 +442,7 @@ def test_main_task_ids_stay_null_without_usable_preflight_json(results, monkeypa
 
 def test_run_refuses_when_results_folder_exists(results, monkeypatch, capsys):
     calls = []
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda *a: calls.append(a))
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda *a, **k: calls.append(a))
     (results / "exp1-pilot").mkdir()
     (results / "exp1-pilot" / "samples.jsonl").write_text("x", encoding="utf-8")
 
@@ -450,7 +456,7 @@ def test_run_refuses_when_results_folder_exists(results, monkeypatch, capsys):
 def test_run_after_preflight_is_allowed(results, monkeypatch):
     calls = []
     fake_module(monkeypatch, "bench.preflight", preflight=lambda cfg, run_dir: (run_dir / "preflight.json").write_text("{}"))
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir: calls.append(run_dir))
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir, max_samples=None: calls.append(run_dir))
 
     assert main(["preflight", str(PILOT)]) == 0
     assert main(["run", str(PILOT)]) == 0
@@ -475,6 +481,101 @@ def test_preflight_refuses_when_run_already_started(results, monkeypatch, capsys
     assert main(["preflight", str(PILOT)]) == 1
     assert calls == []
     assert "already exists" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------- resume
+
+
+def started_run(results, monkeypatch, returns=("001",)):
+    """Start a run with a fake run_experiment and return its folder (as left by an interrupted `run`)."""
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir, max_samples=None: list(returns))
+    assert main(["run", str(PILOT)]) == 0
+    (results / "exp1-pilot" / "inspect_logs").mkdir(exist_ok=True)
+    return results / "exp1-pilot"
+
+
+def test_resume_runs_the_saved_config_and_notes_the_resume(results, monkeypatch):
+    run_dir = started_run(results, monkeypatch)
+    saved = load_config(run_dir / "config.yaml")
+    calls = []
+
+    def run_experiment(cfg, d, max_samples=None):
+        calls.append((cfg, d, max_samples))
+        assert json.loads((d / "manifest.json").read_text(encoding="utf-8"))["end_time"] is None  # running again
+        return ["001", "002"]
+
+    fake_module(monkeypatch, "bench.task", run_experiment=run_experiment)
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+
+    assert main(["resume", "exp1-pilot", "--max-samples", "4"]) == 0
+
+    assert calls == [(saved, run_dir, 4)]
+    m = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert [r["max_samples"] for r in m["resumes"]] == [4] and m["resumes"][0]["time"]
+    assert m["end_time"] is not None and m["main_task_ids"] == ["001", "002"]
+    assert m["start_time"]  # the first start is kept
+
+
+def test_resume_without_override_passes_none_and_notes_it_each_time(results, monkeypatch):
+    run_dir = started_run(results, monkeypatch)
+    calls = []
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: calls.append(max_samples) or ["001"])
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+    assert main(["resume", "exp1-pilot"]) == 0 and main(["resume", "exp1-pilot", "--max-samples", "2"]) == 0
+    assert calls == [None, 2]
+    resumes = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["resumes"]
+    assert [r["max_samples"] for r in resumes] == [None, 2]
+
+
+def test_resume_uses_the_saved_config_not_the_one_in_runs(results, monkeypatch):
+    run_dir = started_run(results, monkeypatch)
+    data = yaml.safe_load((run_dir / "config.yaml").read_text(encoding="utf-8"))
+    data["parallel"]["max_samples"] = 3
+    (run_dir / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
+    seen = []
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: seen.append(cfg.parallel.max_samples) or [])
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+    assert main(["resume", "exp1-pilot"]) == 0
+    assert seen == [3]
+
+
+def test_resume_of_a_run_that_never_started_is_an_error(results, capsys):
+    assert main(["resume", "nope"]) == 1
+    assert "no results folder" in capsys.readouterr().err
+    (results / "bare").mkdir()
+    (results / "bare" / "config.yaml").write_bytes(PILOT.read_bytes())
+    assert main(["resume", "bare"]) == 1
+    assert "holds no started run" in capsys.readouterr().err
+
+
+def test_resume_warns_about_leftover_containers_but_goes_on(results, monkeypatch, capsys):
+    started_run(results, monkeypatch)
+    calls = []
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: calls.append(d) or [])
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: ["inspect-a-1", "inspect-a-2"])
+    assert main(["resume", "exp1-pilot"]) == 0
+    err = capsys.readouterr().err
+    assert "2 Docker containers" in err and "inspect sandbox cleanup docker" in err
+    assert len(calls) == 1
+
+
+def test_run_on_an_existing_folder_points_to_resume(results, monkeypatch, capsys):
+    started_run(results, monkeypatch)
+    assert main(["run", str(PILOT)]) == 1
+    err = capsys.readouterr().err
+    assert "refusing to overwrite" in err and "bench resume exp1-pilot" in err
+
+
+def test_leftover_sandboxes_lists_only_inspect_containers(monkeypatch):
+    out = types.SimpleNamespace(stdout="inspect-run--abc-default-1\nportainer\ninspect-run--abc-gateway-1\n")
+    monkeypatch.setattr(bench_main.subprocess, "run", lambda *a, **k: out)
+    assert bench_main._leftover_sandboxes() == ["inspect-run--abc-default-1", "inspect-run--abc-gateway-1"]
+
+    def no_docker(*a, **k):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr(bench_main.subprocess, "run", no_docker)
+    assert bench_main._leftover_sandboxes() == []
 
 
 def test_run_with_invalid_config_exits_1_naming_the_field(results, tmp_path, capsys):
@@ -631,7 +732,7 @@ def test_render_prompts_can_be_repeated_and_followed_by_preflight_and_run(result
     _, basharena = fake_basharena(monkeypatch)
     fake_module(monkeypatch, "bench.preflight", preflight=lambda cfg, run_dir: (run_dir / "preflight.json").write_text("{}"))
     calls = []
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir: calls.append(run_dir))
+    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir, max_samples=None: calls.append(run_dir))
     assert main(["render-prompts", str(PILOT)]) == 0
     assert main(["render-prompts", str(PILOT)]) == 0
     assert main(["preflight", str(PILOT)]) == 0

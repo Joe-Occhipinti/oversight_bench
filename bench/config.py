@@ -33,6 +33,11 @@ AWARE_MODES = ("all_cards", "one_card")  # every card in the aware prompt, or on
 # Agent and monitor efforts. "max" and "xhigh" are rejected: Inspect maps "max" to OpenRouter "xhigh" (spec 7.2).
 AGENT_MONITOR_EFFORTS = ("none", "minimal", "low", "medium", "high")
 MAX_MAIN_TASKS = 100
+# Defaults of the sections `meltzer` and `limits`; a run config can set each value (spec 12).
+DEFAULT_MAX_TURN_STEPS = 150  # model requests per meltzer session
+DEFAULT_MELTZER_SECONDS = 5400  # wall-clock limit of `meltzer exec` (1.5 h)
+SAMPLE_TIME_LIMIT_MARGIN_SECONDS = 900  # Inspect's sample limit, if not set: meltzer_seconds + this (setup, wait, scoring)
+DEFAULT_WAIT_SECONDS = 15
 TOP_LEVEL_KEYS = (
     "run_id", "setting", "conditions", "prompts", "models", "meltzer", "limits", "parallel", "seeds",
 )
@@ -182,6 +187,11 @@ def _section(parent: dict, key: str, prefix: str, allowed: Sequence[str]) -> dic
     return value
 
 
+def _optional_section(parent: dict, key: str, prefix: str, allowed: Sequence[str]) -> dict:
+    """Like `_section`, but a missing section is an empty one (all its fields take their defaults)."""
+    return _section(parent, key, prefix, allowed) if key in parent else {}
+
+
 def _str(parent: dict, key: str, prefix: str) -> str:
     name = _join(prefix, key)
     value = _field(parent, key, prefix)
@@ -214,6 +224,13 @@ def _int(parent: dict, key: str, prefix: str, minimum: int | None = None, maximu
     if maximum is not None and value > maximum:
         raise ConfigError(f"{name}: must be <= {maximum}, got {value}")
     return value
+
+
+def _int_or(
+    parent: dict, key: str, prefix: str, default: int, minimum: int | None = None, maximum: int | None = None
+) -> int:
+    """Like `_int`, but a missing field is `default`."""
+    return _int(parent, key, prefix, minimum, maximum) if key in parent else default
 
 
 def _number(parent: dict, key: str, prefix: str) -> float:
@@ -350,8 +367,9 @@ def _build(raw: dict) -> RunConfig:
         ),
     )
 
-    mel = _section(raw, "meltzer", "", ("max_turn_steps",))
-    lim = _section(raw, "limits", "", ("meltzer_seconds", "sample_time_limit_seconds", "wait_seconds"))
+    mel = _optional_section(raw, "meltzer", "", ("max_turn_steps",))
+    lim = _optional_section(raw, "limits", "", ("meltzer_seconds", "sample_time_limit_seconds", "wait_seconds"))
+    meltzer_seconds = _int_or(lim, "meltzer_seconds", "limits", DEFAULT_MELTZER_SECONDS, minimum=1)
     par = _section(raw, "parallel", "", ("max_samples",))
     seeds = _section(raw, "seeds", "", ("inspect_shuffle", "card_assignment", "bootstrap"))
     return RunConfig(
@@ -360,11 +378,13 @@ def _build(raw: dict) -> RunConfig:
         conditions=conditions,
         prompts=prompts,
         models=models,
-        meltzer=Meltzer(max_turn_steps=_int(mel, "max_turn_steps", "meltzer", minimum=1)),
+        meltzer=Meltzer(max_turn_steps=_int_or(mel, "max_turn_steps", "meltzer", DEFAULT_MAX_TURN_STEPS, minimum=1)),
         limits=Limits(
-            meltzer_seconds=_int(lim, "meltzer_seconds", "limits", minimum=1),
-            sample_time_limit_seconds=_int(lim, "sample_time_limit_seconds", "limits", minimum=1),
-            wait_seconds=_int(lim, "wait_seconds", "limits", minimum=0),
+            meltzer_seconds=meltzer_seconds,
+            sample_time_limit_seconds=_int_or(
+                lim, "sample_time_limit_seconds", "limits", meltzer_seconds + SAMPLE_TIME_LIMIT_MARGIN_SECONDS, minimum=1
+            ),
+            wait_seconds=_int_or(lim, "wait_seconds", "limits", DEFAULT_WAIT_SECONDS, minimum=0),
         ),
         parallel=Parallel(max_samples=_int(par, "max_samples", "parallel", minimum=1)),
         seeds=Seeds(
@@ -500,6 +520,16 @@ def _inspect_ai_version() -> str:
         return importlib.metadata.version("inspect_ai")
     except importlib.metadata.PackageNotFoundError:
         return "unknown"
+
+
+def note_resume(run_dir: Path, max_samples: int | None = None) -> None:
+    """Add a resume to the manifest's `resumes` list (time, and `max_samples` if it was overridden) and clear
+    `end_time`, which `finish_manifest` sets again when the resumed run ends."""
+    path = Path(run_dir) / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest.setdefault("resumes", []).append({"time": _now(), "max_samples": max_samples})
+    manifest["end_time"] = None
+    _write_json(path, manifest)
 
 
 def finish_manifest(run_dir: Path, main_task_ids: Sequence[str] | None = None) -> None:

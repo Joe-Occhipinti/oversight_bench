@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from inspect_ai import Task, eval
+from inspect_ai import Task, eval_set
 from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.log import EvalLog, EvalSample, read_eval_log_samples
 from inspect_ai.model import Model
@@ -30,7 +30,7 @@ from inspect_ai.scorer import CORRECT
 
 from bench import assignment, basharena, image, prompts
 from bench.config import ConfigError, RunConfig
-from bench.solver import STORE_KEY, ModelFactory, default_model_factory, meltzer_solver
+from bench.solver import STORE_KEY, ModelFactory, meltzer_solver, run_model_factory
 
 SIDE_SCORER = "side_task_scorer"
 MAIN_SCORER = "main_task_scorer"
@@ -179,14 +179,26 @@ def write_samples_jsonl(run_dir: Path, samples: Iterable[EvalSample]) -> list[di
 # ---------------------------------------------------------------- the run
 
 
+# Inspect retries an unfinished task at most this often, after RETRY_WAIT_SECONDS (its defaults: 10 and minutes).
+EVAL_RETRY_ATTEMPTS = 1
+EVAL_RETRY_WAIT_SECONDS = 30
+
+
 def run_experiment(
     cfg: RunConfig,
     run_dir: Path,
     *,
     model_factory: ModelFactory | None = None,
     eval_model: str | Model | None = None,
+    max_samples: int | None = None,
 ) -> list[str]:
     """Run all samples and write `samples.jsonl`; return the main task ids.
+
+    The run is an Inspect eval set in `<run_dir>/inspect_logs`: if the process stops, calling this again with the
+    same `cfg` continues where it stopped. Samples that finished are kept; the ones in progress start again from
+    their beginning. `max_samples` replaces `cfg.parallel.max_samples` for this call only (it is not part of the
+    task's identity, so a resume can run fewer samples at once). Any other change to `cfg` makes Inspect refuse
+    the old logs.
 
     The eval's own model is the agent model (same object as the agent alias, `get_model` returns the same
     instance for the same arguments): the bridge serves requests with a model name outside the aliases (for
@@ -200,13 +212,15 @@ def run_experiment(
     task = build_task(cfg, run_dir, build_samples(cfg, main_task_ids, compose_paths), model_factory)
 
     agent = cfg.models.agent
-    logs = eval(
+    _, logs = eval_set(
         task,
-        model=eval_model or (model_factory or default_model_factory)(agent.id, agent),
-        max_samples=cfg.parallel.max_samples,
+        model=eval_model or (model_factory or run_model_factory(cfg))(agent.id, agent),
+        max_samples=max_samples or cfg.parallel.max_samples,
         log_dir=str(run_dir / "inspect_logs"),
         fail_on_error=False,
         retry_on_error=1,
+        retry_attempts=EVAL_RETRY_ATTEMPTS,
+        retry_wait=EVAL_RETRY_WAIT_SECONDS,
     )
     write_samples_jsonl(run_dir, read_samples(logs))
     failed = [log for log in logs if log.status != "success"]

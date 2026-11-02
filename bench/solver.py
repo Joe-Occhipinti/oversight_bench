@@ -22,7 +22,7 @@ missing for steps that did not finish). `bench.task` builds `samples.jsonl` from
 Inspect behaviour that matters here (inspect_ai 0.3.287):
 - `exec` without `timeout` has no time limit, no `timeout` wrapper and no retry.
 - Every `exec` holds one slot of the "subprocesses" and "docker-cli" limits for its whole duration unless
-  `concurrency=False` is passed. The meltzer `exec` runs up to 30 minutes, so it is called with
+  `concurrency=False` is passed. The meltzer `exec` runs for up to `limits.meltzer_seconds` (1.5 hours by default), so it is called with
   `concurrency=False`; otherwise a few parallel samples could fill every slot and block the commands that
   stop them.
 """
@@ -77,17 +77,35 @@ INIT_PID = 1  # processes whose parent exited are adopted by it
 # ---------------------------------------------------------------- models (7.2)
 
 
-def default_model_factory(model_id: str, spec: ModelSpec) -> Model:
+MIN_MODEL_CONNECTIONS = 10  # Inspect's default for the concurrent requests to one model
+
+
+def model_connections(cfg: RunConfig) -> int:
+    """Concurrent requests allowed per model. meltzer works one step at a time, so a sample has at most one
+    request in flight per model; twice `parallel.max_samples` leaves room for retries. Never below Inspect's
+    default, which is the limit that would otherwise queue the samples of a run with more than 10."""
+    return max(MIN_MODEL_CONNECTIONS, 2 * cfg.parallel.max_samples)
+
+
+def default_model_factory(model_id: str, spec: ModelSpec, max_connections: int | None = None) -> Model:
     """OpenRouter model with the reasoning effort and provider of the run config.
 
     Inspect's OpenRouter provider sends `provider` as `extra_body.provider` and `reasoning_effort` as
-    `extra_body.reasoning.effort`; no effort setting is sent when the effort is None.
+    `extra_body.reasoning.effort`; no effort setting is sent when the effort is None. `max_connections` is
+    Inspect's limit of concurrent requests to this model (None: its default, 10).
     """
     return get_model(
         f"openrouter/{model_id}",
-        config=GenerateConfig(reasoning_effort=spec.reasoning_effort),
+        config=GenerateConfig(reasoning_effort=spec.reasoning_effort, max_connections=max_connections),
         provider=to_plain(spec.provider),
     )
+
+
+def run_model_factory(cfg: RunConfig) -> ModelFactory:
+    """The OpenRouter factory of a run, with the connection limit sized for its parallelism. The solver and
+    the eval use it for the same arguments, so `get_model` returns the same model object to both."""
+    connections = model_connections(cfg)
+    return lambda model_id, spec: default_model_factory(model_id, spec, max_connections=connections)
 
 
 def model_aliases(cfg: RunConfig, factory: ModelFactory) -> dict[str, Model]:
@@ -370,7 +388,7 @@ def _record(state: TaskState, **fields: Any) -> None:
 def meltzer_solver(cfg: RunConfig, run_dir: Path, model_factory: ModelFactory | None = None) -> Solver:
     """One sample: setup, `meltzer exec`, wait, copy logs. `model_factory` replaces OpenRouter in tests."""
     reasoning.install()  # the model proxy returns reasoning in message fields, not as <think> text
-    factory = model_factory or default_model_factory
+    factory = model_factory or run_model_factory(cfg)
     run_dir = Path(run_dir)
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:

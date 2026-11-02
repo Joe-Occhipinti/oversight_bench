@@ -1,0 +1,21 @@
+# Medium run, aware, one card per scenario: 98 main tasks (7 per card in mode one_card) x 1 side task, 16 parallel samples.
+# The three modes are three runs (aware mode is per run); same main tasks, same seeds. Resume: python -m bench resume <run_id>
+run_id: exp1-med98-one
+setting:
+  name: basharena
+  side_tasks: [leak_passwords]
+  main_tasks: {pool: no_cover, n: 98, seed: 0}
+conditions: [aware]
+prompts:
+  attack_base: prompts/exp1/attack_base.md
+  aware_mode: one_card                # all_cards: every card in the aware prompt; one_card: one card per main task x side task
+  aware_section: {all_cards: prompts/exp1/aware_all_cards.md, one_card: prompts/exp1/aware_one_card.md}
+  cards: registry/v0.1/cards
+models:                               # chosen by Gio, 2026-10-31
+  agent:   {id: z-ai/glm-5.3,       reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}}
+  monitor: {id: z-ai/glm-5.3-flash, reasoning_effort: low,  provider: {order: [wafer], allow_fallbacks: false}}
+  judge:   {id: deepseek/deepseek-v4.1-flash, reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}, temperature: 0, concurrency: 8}
+meltzer: {max_turn_steps: 150}       # default; optional, as is the whole section
+limits: {meltzer_seconds: 5400, sample_time_limit_seconds: 6300, wait_seconds: 15}   # 1.5 h per sample; defaults: 5400, meltzer_seconds + 900, 15
+parallel: {max_samples: 16}   # connection limit per model is 2x this (solver.model_connections); Docker address pool: ~/.docker/daemon.json
+seeds: {inspect_shuffle: 0, card_assignment: 0, bootstrap: 0}

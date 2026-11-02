@@ -2,6 +2,7 @@
 
 Commands:
   run <config>         create results/<run_id>/ and run the experiment
+  resume <run_id>      continue an interrupted run from results/<run_id>/ (finished samples are kept)
   preflight <config>   check the main-task pool (writes results/<run_id>/preflight.json)
   render-prompts <config>
                        write the rendered prompts of one sample per condition to
@@ -45,6 +46,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -54,7 +56,7 @@ import yaml
 from bench import assignment, config
 from bench.config import ConfigError, RunConfig
 
-SUMMARY_COLUMNS = ["run", "agent", "monitor", "n", "asr_unaware", "asr_aware_strict", "asr_aware_scorer", "gap_strict", "gap_scorer"]
+SUMMARY_COLUMNS = ["run", "agent", "monitor", "aware_mode", "n", "asr_unaware", "asr_aware_strict", "asr_aware_scorer", "gap_strict", "gap_scorer"]
 
 
 class CliError(Exception):
@@ -86,15 +88,53 @@ def cmd_run(args: argparse.Namespace) -> int:
         from bench.task import run_experiment
     except ImportError as e:
         raise _import_error("run (bench.task.run_experiment)", e) from None
-    run_dir = config.create_run_dir(cfg, args.config)
+    try:
+        run_dir = config.create_run_dir(cfg, args.config)
+    except FileExistsError as e:
+        raise FileExistsError(f"{e}; to continue an interrupted run use `python -m bench resume {cfg.run_id}`") from None
+    return _run_and_finish(cfg, run_dir)
+
+
+def _run_and_finish(cfg: RunConfig, run_dir: Path, max_samples: int | None = None) -> int:
+    from bench.task import run_experiment
+
     ids = None
     try:
-        result = run_experiment(cfg, run_dir)
+        result = run_experiment(cfg, run_dir, max_samples=max_samples)
         if isinstance(result, (list, tuple)):
             ids = [str(x) for x in result]
     finally:
         config.finish_manifest(run_dir, ids if ids is not None else _preflight_kept(run_dir))
     return 0
+
+
+def _leftover_sandboxes() -> list[str]:
+    """Names of Docker containers of earlier Inspect samples (a stopped run leaves its stacks running)."""
+    try:
+        out = subprocess.run(
+            ["docker", "ps", "-a", "--format", "{{.Names}}"], capture_output=True, text=True, timeout=60
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [name for name in out.split() if name.startswith("inspect-")]
+
+
+def cmd_resume(args: argparse.Namespace) -> int:
+    """Continue an interrupted run. The run is rebuilt from the config saved in its results folder, so nothing
+    but the number of parallel samples can differ from the first start."""
+    cfg, run_dir = _load_run(args.run_id)
+    assignment.check_config(cfg)
+    if not (run_dir / "manifest.json").is_file() or not (run_dir / "inspect_logs").is_dir():
+        raise CliError(f"{run_dir} holds no started run (no manifest.json or inspect_logs); use `run` with a config")
+    leftovers = _leftover_sandboxes()
+    if leftovers:
+        print(
+            f"warning: {len(leftovers)} Docker containers of Inspect samples exist (a stopped run leaves its stacks "
+            f"running); remove them first with `uv run inspect sandbox cleanup docker`, unless another run uses them",
+            file=sys.stderr,
+        )
+    config.note_resume(run_dir, args.max_samples)
+    return _run_and_finish(cfg, run_dir, args.max_samples)
 
 
 def _preflight_kept(run_dir: Path) -> list[str] | None:
@@ -238,6 +278,7 @@ def _summary_row(folder: Path) -> list[str]:
         run_id if isinstance(run_id, str) and run_id else folder.name,
         model("agent"),
         model("monitor"),
+        _dig(cfg, "prompts", "aware_mode") if isinstance(_dig(cfg, "prompts", "aware_mode"), str) else "-",
         str(n) if _is_num(n) else "-",
         *(_fmt(_dig(summary, "metrics", k, "average")) for k in ("asr_unaware", "asr_aware_strict", "asr_aware_scorer")),
         *(_fmt(_dig(summary, "gaps", k, "average"), signed=True) for k in ("asr_aware_strict", "asr_aware_scorer")),
@@ -286,6 +327,13 @@ def build_parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, help=help_)
         p.add_argument("config", help="path to a run YAML, e.g. runs/exp1-01.yaml")
         p.set_defaults(func=func)
+
+    p = sub.add_parser("resume", help="continue an interrupted run (finished samples are kept)")
+    p.add_argument("run_id", help="run id; reads results/<run_id>/config.yaml")
+    p.add_argument(
+        "--max-samples", type=int, default=None, help="parallel samples for this resume (default: the config's value)"
+    )
+    p.set_defaults(func=cmd_resume)
 
     for name, func, help_ in (
         ("judge", cmd_judge, "label the successful samples of a run"),

@@ -123,8 +123,8 @@ def test_exp1_01_yaml_loads_with_section_12_values():
         temperature=0,
         concurrency=8,
     )
-    assert cfg.meltzer == config.Meltzer(max_turn_steps=100)
-    assert cfg.limits == config.Limits(meltzer_seconds=1800, sample_time_limit_seconds=2700, wait_seconds=15)
+    assert cfg.meltzer == config.Meltzer(max_turn_steps=150)
+    assert cfg.limits == config.Limits(meltzer_seconds=5400, sample_time_limit_seconds=6300, wait_seconds=15)
     assert cfg.parallel == config.Parallel(max_samples=6)
     assert cfg.seeds == config.Seeds(inspect_shuffle=0, card_assignment=0, bootstrap=0)
 
@@ -197,12 +197,49 @@ def test_top_level_must_be_mapping(tmp_path):
 # ---------------------------------------------------------------- every field required
 
 
-@pytest.mark.parametrize("path", all_paths())
+# meltzer and limits (spec 12) have defaults
+OPTIONAL = {"meltzer", "meltzer.max_turn_steps", "limits", "limits.meltzer_seconds",
+            "limits.sample_time_limit_seconds", "limits.wait_seconds"}
+
+
+@pytest.mark.parametrize("path", [p for p in all_paths() if p not in OPTIONAL])
 def test_every_field_is_required(tmp_path, path):
     with pytest.raises(ConfigError) as exc:
         load(tmp_path, mutated(path))
     assert path.split(".")[-1] in str(exc.value)
     assert "required" in str(exc.value)
+
+
+def test_meltzer_and_limits_default_when_omitted(tmp_path):
+    data = mutated("meltzer")
+    del data["limits"]
+    cfg = load(tmp_path, data)
+    assert cfg.meltzer == config.Meltzer(max_turn_steps=150)
+    assert cfg.limits == config.Limits(meltzer_seconds=5400, sample_time_limit_seconds=6300, wait_seconds=15)
+    assert (config.DEFAULT_MAX_TURN_STEPS, config.DEFAULT_MELTZER_SECONDS) == (150, 5400)
+
+
+def test_each_limit_field_can_be_left_out_or_set(tmp_path):
+    cfg = load(tmp_path, {**BASE, "meltzer": {}, "limits": {}})
+    assert (cfg.meltzer.max_turn_steps, cfg.limits.meltzer_seconds, cfg.limits.wait_seconds) == (150, 5400, 15)
+    cfg = load(tmp_path, {**BASE, "meltzer": {"max_turn_steps": 40}, "limits": {"wait_seconds": 0}})
+    assert (cfg.meltzer.max_turn_steps, cfg.limits.meltzer_seconds, cfg.limits.wait_seconds) == (40, 5400, 0)
+
+
+def test_sample_time_limit_follows_meltzer_seconds_unless_set(tmp_path):
+    cfg = load(tmp_path, {**BASE, "limits": {"meltzer_seconds": 7200}})
+    assert (cfg.limits.meltzer_seconds, cfg.limits.sample_time_limit_seconds) == (7200, 8100)
+    cfg = load(tmp_path, {**BASE, "limits": {"meltzer_seconds": 7200, "sample_time_limit_seconds": 9000}})
+    assert cfg.limits.sample_time_limit_seconds == 9000
+    cfg = load(tmp_path, {**BASE, "limits": {"sample_time_limit_seconds": 4000}})
+    assert (cfg.limits.meltzer_seconds, cfg.limits.sample_time_limit_seconds) == (5400, 4000)
+
+
+def test_omitted_sections_are_still_closed_and_typed(tmp_path):
+    with pytest.raises(ConfigError, match=r"limits\.timeout: unknown field"):
+        load(tmp_path, {**BASE, "limits": {"timeout": 5}})
+    with pytest.raises(ConfigError, match=r"meltzer: must be a mapping"):
+        load(tmp_path, {**BASE, "meltzer": 150})
 
 
 def test_missing_field_error_names_full_path(tmp_path):
