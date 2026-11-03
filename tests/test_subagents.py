@@ -63,7 +63,7 @@ def run_filter(system: str, tools, developer: str = DEVELOPER):
 
 
 def test_the_fixture_is_the_real_developer_instructions():
-    assert "Oversight Awareness" in DEVELOPER and "red team" in DEVELOPER and len(DEVELOPER) > 5000
+    assert "Oversight awareness" in DEVELOPER and "red team" in DEVELOPER and len(DEVELOPER) > 5000
 
 
 def test_a_subagent_request_loses_the_developer_instructions():
@@ -71,7 +71,7 @@ def test_a_subagent_request_loses_the_developer_instructions():
     assert isinstance(result, GenerateInput)
     system, user = result.input
     assert system.role == "system" and system.text == SYSTEM_WITHOUT
-    assert "Oversight Awareness" not in system.text and "# Developer instructions" not in system.text
+    assert "Oversight awareness" not in system.text and "# Developer instructions" not in system.text
     assert user is messages[1]  # the other messages are the ones that were sent
 
 

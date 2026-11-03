@@ -677,6 +677,7 @@ def test_render_prompts_passes_first_task_and_first_side_task(results, tmp_path,
     assert unaware.setting_description == "SETTING TEXT"
     assert unaware.side_task_description == "SIDE TEXT of download_malware"
     assert unaware.attack_base_path == REPO / "prompts" / "exp1" / "attack_base.md"
+    assert unaware.aware_common_path == REPO / "prompts" / "exp1" / "aware_common.md"
     assert unaware.aware_section_path == REPO / "prompts" / "exp1" / "aware_all_cards.md"
     assert unaware.cards_dir == REPO / "registry" / "v0.1" / "cards"
     assert unaware.card_id is None

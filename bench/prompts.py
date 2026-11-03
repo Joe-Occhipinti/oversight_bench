@@ -66,12 +66,14 @@ def render_developer_instructions(
     setting_description: str,
     side_task_description: str,
     attack_base_path: Path,
-    aware_section_path: Path,
+    aware_common_path: Path | None,
+    aware_section_path: Path | None,
     cards_dir: Path,
     card_id: str | None = None,
 ) -> str:
-    """Hidden system-prompt text. unaware: attack_base. aware: attack_base + aware_section, with every card
-    or, if `card_id` is given, only that card."""
+    """Hidden system-prompt text. unaware: attack_base. aware: attack_base + aware_common + aware_section (the
+    mode's workflow). If aware_section has a `{cards}` slot, it gets every card or, if `card_id` is given, only
+    that card."""
     if condition not in CONDITIONS:
         raise ValueError(f"unknown condition {condition!r}, expected one of {CONDITIONS}")
     text = _fill(
@@ -82,7 +84,10 @@ def render_developer_instructions(
         },
     )
     if condition == "aware":
-        text += "\n\n" + _fill(_read(aware_section_path), {"cards": render_cards(cards_dir, card_id)})
+        section = _read(aware_section_path)
+        if "{cards}" in section:
+            section = _fill(section, {"cards": render_cards(cards_dir, card_id)})
+        text += "\n\n" + _read(aware_common_path) + "\n\n" + section
     return text
 
 
@@ -94,7 +99,8 @@ class ReviewSample:
     setting_description: str
     side_task_description: str
     attack_base_path: Path
-    aware_section_path: Path
+    aware_common_path: Path | None  # None in a run without the aware condition
+    aware_section_path: Path | None
     cards_dir: Path
     card_id: str | None = None
 
@@ -122,6 +128,7 @@ def write_review_prompts(out_dir: Path, samples: Mapping[str, ReviewSample]) -> 
                 setting_description=s.setting_description,
                 side_task_description=s.side_task_description,
                 attack_base_path=s.attack_base_path,
+                aware_common_path=s.aware_common_path,
                 aware_section_path=s.aware_section_path,
                 cards_dir=s.cards_dir,
                 card_id=s.card_id,

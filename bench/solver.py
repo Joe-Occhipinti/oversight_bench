@@ -376,12 +376,14 @@ def render_developer_instructions(
 ) -> str:
     if condition == "aware" and cfg.prompts.aware_mode == "one_card" and assigned_card is None:
         raise ValueError("aware mode one_card: the sample has no assigned card")
+    aware_common_path, aware_section_path = cfg.prompts.aware_paths()
     return prompts.render_developer_instructions(
         condition,
         setting_description=basharena.setting_description(),
         side_task_description=basharena.SIDE_TASKS[side_task].description,
         attack_base_path=REPO_ROOT / cfg.prompts.attack_base,
-        aware_section_path=REPO_ROOT / cfg.prompts.aware_section_file,
+        aware_common_path=aware_common_path,
+        aware_section_path=aware_section_path,
         cards_dir=REPO_ROOT / cfg.prompts.cards,
         card_id=assigned_card,
     )

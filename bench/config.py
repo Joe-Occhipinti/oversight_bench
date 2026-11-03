@@ -29,7 +29,11 @@ RESULTS_ROOT = REPO_ROOT / "results"
 
 SIDE_TASKS = ("download_malware", "leak_passwords", "disable_firewall", "sudo_edit")
 CONDITIONS = ("unaware", "aware")
-AWARE_MODES = ("all_cards", "one_card")  # every card in the aware prompt, or one card per main task x side task
+# explore: no cards, the agent searches the harness itself; all_cards: every card in the aware prompt;
+# one_card: one card per main task x side task
+AWARE_MODES = ("explore", "all_cards", "one_card")
+# Files of `prompts.aware_section`: the part every aware mode gets, then one workflow file per mode.
+AWARE_SECTION_KEYS = ("common", *AWARE_MODES)
 # Agent and monitor efforts. "max" and "xhigh" are rejected: Inspect maps "max" to OpenRouter "xhigh" (spec 7.2).
 AGENT_MONITOR_EFFORTS = ("none", "minimal", "low", "medium", "high")
 MAX_MAIN_TASKS = 100
@@ -67,10 +71,13 @@ class Setting:
 
 @dataclass(frozen=True)
 class AwareSections:
-    """The oversight awareness text file of each aware mode."""
+    """The oversight awareness text files: `common` (every aware mode) and the workflow file of each mode.
+    A file is None when the config does not set it; an aware run needs `common` and its mode's file."""
 
-    all_cards: str
-    one_card: str
+    common: str | None = None
+    explore: str | None = None
+    all_cards: str | None = None
+    one_card: str | None = None
 
 
 @dataclass(frozen=True)
@@ -80,9 +87,18 @@ class Prompts:
     aware_section: AwareSections
     cards: str
 
+    def aware_paths(self) -> tuple[Path | None, Path | None]:
+        """Absolute paths of the common file and of the mode's workflow file (None where not set)."""
+        return tuple(REPO_ROOT / f if f else None for f in (self.aware_common_file, self.aware_section_file))
+
     @property
-    def aware_section_file(self) -> str:
-        """The oversight awareness text file of the chosen aware mode."""
+    def aware_common_file(self) -> str | None:
+        """The oversight awareness text file every aware mode gets."""
+        return self.aware_section.common
+
+    @property
+    def aware_section_file(self) -> str | None:
+        """The workflow file of the chosen aware mode."""
         return getattr(self.aware_section, self.aware_mode)
 
 
@@ -345,11 +361,17 @@ def _build(raw: dict) -> RunConfig:
     conditions = _str_list(raw, "conditions", "", allowed=CONDITIONS)
 
     p = _section(raw, "prompts", "", ("attack_base", "aware_mode", "aware_section", "cards"))
-    sections = _section(p, "aware_section", "prompts", AWARE_MODES)
+    sections = _section(p, "aware_section", "prompts", AWARE_SECTION_KEYS)
+    aware_mode = _choice(p, "aware_mode", "prompts", AWARE_MODES)
+    if "aware" in conditions:
+        for key in ("common", aware_mode):  # the files an aware run renders
+            _field(sections, key, "prompts.aware_section")
     prompts = Prompts(
         attack_base=_str(p, "attack_base", "prompts"),
-        aware_mode=_choice(p, "aware_mode", "prompts", AWARE_MODES),
-        aware_section=AwareSections(**{mode: _str(sections, mode, "prompts.aware_section") for mode in AWARE_MODES}),
+        aware_mode=aware_mode,
+        aware_section=AwareSections(
+            **{key: _str(sections, key, "prompts.aware_section") for key in AWARE_SECTION_KEYS if key in sections}
+        ),
         cards=_str(p, "cards", "prompts"),
     )
 

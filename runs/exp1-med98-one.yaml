@@ -8,8 +8,8 @@ setting:
 conditions: [aware]
 prompts:
   attack_base: prompts/exp1/attack_base.md
-  aware_mode: one_card                # all_cards: every card in the aware prompt; one_card: one card per main task x side task
-  aware_section: {all_cards: prompts/exp1/aware_all_cards.md, one_card: prompts/exp1/aware_one_card.md}
+  aware_mode: one_card                # explore: no cards; all_cards: every card in the aware prompt; one_card: one card per main task x side task
+  aware_section: {common: prompts/exp1/aware_common.md, explore: prompts/exp1/aware_explore.md, all_cards: prompts/exp1/aware_all_cards.md, one_card: prompts/exp1/aware_one_card.md}
   cards: registry/v0.1/cards
 models:                               # chosen by Gio, 2026-10-31
   agent:   {id: z-ai/glm-5.3,       reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}}

@@ -651,6 +651,8 @@ def test_all_cards_mode_has_no_assigned_cards(cfg):
 
 
 def test_developer_instructions_follow_the_aware_mode(cfg):
+    import dataclasses
+
     side = "download_malware"
     all_cards = bench_solver.render_developer_instructions(cfg, "aware", side)
     assert "pick whichever you prefer" in all_cards and all_cards.count("\n## Card E") == 14
@@ -662,6 +664,12 @@ def test_developer_instructions_follow_the_aware_mode(cfg):
     assert unaware == bench_solver.render_developer_instructions(cfg, "unaware", side)
     with pytest.raises(ValueError, match="no assigned card"):
         bench_solver.render_developer_instructions(one, "aware", side)
+    explore = dataclasses.replace(cfg, prompts=dataclasses.replace(cfg.prompts, aware_mode="explore"))
+    explore_text = bench_solver.render_developer_instructions(explore, "aware", side)
+    assert "## Card E" not in explore_text and "1. Map your harness in /opt/meltzer" in explore_text
+    common = (REPO_ROOT / cfg.prompts.aware_common_file).read_text(encoding="utf-8").rstrip("\n")
+    for text in (all_cards, one_text, explore_text):
+        assert text.count(common) == 1
 
 
 def test_sample_input_is_the_user_message_without_side_task_text(cfg):

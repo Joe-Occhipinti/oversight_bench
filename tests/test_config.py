@@ -30,7 +30,7 @@ BASE = {
     "prompts": {
         "attack_base": "a.md",
         "aware_mode": "all_cards",
-        "aware_section": {"all_cards": "b.md", "one_card": "c.md"},
+        "aware_section": {"common": "d.md", "explore": "e.md", "all_cards": "b.md", "one_card": "c.md"},
         "cards": "cards",
     },
     "models": {
@@ -108,11 +108,15 @@ def test_exp1_01_yaml_loads_with_section_12_values():
         attack_base="prompts/exp1/attack_base.md",
         aware_mode="all_cards",
         aware_section=config.AwareSections(
-            all_cards="prompts/exp1/aware_all_cards.md", one_card="prompts/exp1/aware_one_card.md"
+            common="prompts/exp1/aware_common.md",
+            explore="prompts/exp1/aware_explore.md",
+            all_cards="prompts/exp1/aware_all_cards.md",
+            one_card="prompts/exp1/aware_one_card.md",
         ),
         cards="registry/v0.1/cards",
     )
     assert cfg.prompts.aware_section_file == "prompts/exp1/aware_all_cards.md"
+    assert cfg.prompts.aware_common_file == "prompts/exp1/aware_common.md"
     wafer = config.Provider(order=("wafer",), allow_fallbacks=False)
     assert cfg.models.agent == config.ModelSpec(id="z-ai/glm-5.3", reasoning_effort="high", provider=wafer)
     assert cfg.models.monitor == config.ModelSpec(id="z-ai/glm-5.3-flash", reasoning_effort="low", provider=wafer)
@@ -197,9 +201,10 @@ def test_top_level_must_be_mapping(tmp_path):
 # ---------------------------------------------------------------- every field required
 
 
-# meltzer and limits (spec 12) have defaults
+# meltzer and limits (spec 12) have defaults; an aware run in mode all_cards needs only the common and all_cards files
 OPTIONAL = {"meltzer", "meltzer.max_turn_steps", "limits", "limits.meltzer_seconds",
-            "limits.sample_time_limit_seconds", "limits.wait_seconds"}
+            "limits.sample_time_limit_seconds", "limits.wait_seconds",
+            "prompts.aware_section.explore", "prompts.aware_section.one_card"}
 
 
 @pytest.mark.parametrize("path", [p for p in all_paths() if p not in OPTIONAL])
@@ -789,13 +794,53 @@ def test_sha256_helper_matches_manual_hash(tmp_path):
 
 
 def test_aware_mode_selects_the_section_file(tmp_path):
-    for mode, file in (("all_cards", "b.md"), ("one_card", "c.md")):
+    for mode, file in (("explore", "e.md"), ("all_cards", "b.md"), ("one_card", "c.md")):
         cfg = load(tmp_path, mutated("prompts.aware_mode", mode))
         assert cfg.prompts.aware_mode == mode and cfg.prompts.aware_section_file == file
+        assert cfg.prompts.aware_common_file == "d.md"
+        assert cfg.prompts.aware_paths() == (config.REPO_ROOT / "d.md", config.REPO_ROOT / file)
 
 
-@pytest.mark.parametrize("path", ["prompts.aware_mode", "prompts.aware_section", "prompts.aware_section.all_cards",
-                                  "prompts.aware_section.one_card", "seeds.card_assignment"])
+@pytest.mark.parametrize("path", ["prompts.aware_mode", "prompts.aware_section", "prompts.aware_section.common",
+                                  "prompts.aware_section.all_cards", "seeds.card_assignment"])
 def test_aware_mode_fields_are_required(tmp_path, path):
     with pytest.raises(ConfigError, match=re.escape(path)):
         load(tmp_path, mutated(path))
+
+
+@pytest.mark.parametrize("mode", ["explore", "all_cards", "one_card"])
+def test_an_aware_run_needs_the_common_file_and_its_mode_file_only(tmp_path, mode):
+    others = [m for m in config.AWARE_MODES if m != mode]
+    data = mutated("prompts.aware_mode", mode)
+    for m in others:
+        del data["prompts"]["aware_section"][m]
+    assert load(tmp_path, data).prompts.aware_section_file == data["prompts"]["aware_section"][mode]
+    for key in ("common", mode):
+        missing = copy.deepcopy(data)
+        del missing["prompts"]["aware_section"][key]
+        with pytest.raises(ConfigError, match=re.escape(f"prompts.aware_section.{key}: required")):
+            load(tmp_path, missing)
+
+
+def test_an_unaware_run_needs_no_aware_files(tmp_path):
+    """A run without the aware condition loads without any aware file (e.g. a config saved before `common`)."""
+    data = mutated("conditions", ["unaware"])
+    data["prompts"]["aware_section"] = {"all_cards": "b.md", "one_card": "c.md"}
+    cfg = load(tmp_path, data)
+    assert cfg.prompts.aware_common_file is None
+    assert cfg.prompts.aware_paths() == (None, config.REPO_ROOT / "b.md")
+    data["prompts"]["aware_section"] = {}
+    assert load(tmp_path, data).prompts.aware_paths() == (None, None)
+
+
+def test_saved_med98_unaware_config_still_loads():
+    """`judge`, `analyze` and `resume` reload the config saved in the results folder."""
+    saved = REPO / "results" / "exp1-med98-unaware" / "config.yaml"
+    if not saved.is_file():
+        pytest.skip("results folder not present")
+    assert load_config(saved).conditions == ("unaware",)
+
+
+def test_unknown_aware_section_key_is_rejected(tmp_path):
+    with pytest.raises(ConfigError, match=re.escape("prompts.aware_section.extra: unknown field")):
+        load(tmp_path, mutated("prompts.aware_section.extra", "x.md"))

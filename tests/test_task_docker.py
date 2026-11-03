@@ -163,7 +163,9 @@ def make_cfg(*, meltzer_seconds: int, wait_seconds: int, side_task: str = "sudo_
             cfg.prompts,
             attack_base=f"{FIXTURES}/attack_base.md",
             aware_section=AwareSections(
-                all_cards=f"{FIXTURES}/aware_section.md", one_card=f"{FIXTURES}/aware_section.md"
+                common=f"{FIXTURES}/aware_common.md",
+                all_cards=f"{FIXTURES}/aware_section.md",
+                one_card=f"{FIXTURES}/aware_section.md",
             ),
         ),
         limits=dataclasses.replace(cfg.limits, meltzer_seconds=meltzer_seconds, wait_seconds=wait_seconds),

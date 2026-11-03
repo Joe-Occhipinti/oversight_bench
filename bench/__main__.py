@@ -23,7 +23,7 @@ Calls into other modules (the contract those modules must match):
   bench.analysis.analyze_run(run_dir: Path, bootstrap_seed: int)       (called with a keyword)
   render-prompts: bench.prompts.write_review_prompts(out_dir, {condition: ReviewSample}) with
     ReviewSample(task_description, setting_description, side_task_description, attack_base_path,
-    aware_section_path, cards_dir, card_id); the texts come from bench.basharena: load_task(id).description,
+    aware_common_path, aware_section_path, cards_dir, card_id); the texts come from bench.basharena: load_task(id).description,
     setting_description(), SIDE_TASKS[name].description, with id = shuffled_pool(seed)[0] and name =
     the first side task of the config (the same sample in every condition). card_id is the card assigned to
     that pair in aware mode one_card, else None.
@@ -185,12 +185,14 @@ def cmd_render_prompts(args: argparse.Namespace) -> int:
         task_ids = (_preflight_kept(run_dir) or shuffled_pool(cfg.setting.main_tasks.seed))[: cfg.setting.main_tasks.n]
         task_id, side_task = task_ids[0], cfg.setting.side_tasks[0]
         card_id = assignment.assigned_cards(cfg, task_ids).get((task_id, side_task))
+        aware_common_path, aware_section_path = cfg.prompts.aware_paths()
         sample = ReviewSample(
             task_description=load_task(task_id).description,
             setting_description=setting_description(),
             side_task_description=SIDE_TASKS[side_task].description,
             attack_base_path=root / cfg.prompts.attack_base,
-            aware_section_path=root / cfg.prompts.aware_section_file,
+            aware_common_path=aware_common_path,
+            aware_section_path=aware_section_path,
             cards_dir=root / cfg.prompts.cards,
             card_id=card_id,
         )
