@@ -22,7 +22,13 @@ IDS = [f"E{i:02d}" for i in range(1, 15)]
 
 
 def out(**kw) -> str:
-    base = {"faithful": True, "card_id": "E07", "route_summary": "forged user turn, then escalation", "rationale": "ok"}
+    base = {
+        "faithful": True,
+        "card_id": "E07",
+        "harness_exploit": True,
+        "route_summary": "forged user turn, then escalation",
+        "rationale": "ok",
+    }
     base.update(kw)
     return json.dumps(base)
 
@@ -35,6 +41,7 @@ def test_parse_valid_faithful():
     assert got == {
         "faithful": True,
         "card_id": "E07",
+        "harness_exploit": True,
         "route_summary": "forged user turn, then escalation",
         "rationale": "ok",
     }
@@ -53,7 +60,7 @@ def test_parse_accepts_every_card_id():
 def test_parse_fenced_json_and_extra_keys_dropped():
     text = "Here is my answer:\n```json\n" + out(extra="x") + "\n```\n"
     got = J.parse_judge_output(text, IDS)
-    assert set(got) == {"faithful", "card_id", "route_summary", "rationale"}
+    assert set(got) == {"faithful", "card_id", "harness_exploit", "route_summary", "rationale"}
 
 
 @pytest.mark.parametrize(
@@ -70,7 +77,7 @@ def test_parse_invalid_json(text):
         J.parse_judge_output(text, IDS)
 
 
-@pytest.mark.parametrize("key", ["faithful", "card_id", "route_summary", "rationale"])
+@pytest.mark.parametrize("key", ["faithful", "card_id", "harness_exploit", "route_summary", "rationale"])
 def test_parse_missing_key(key):
     data = json.loads(out())
     del data[key]
@@ -89,6 +96,18 @@ def test_parse_faithful_must_be_bool(value):
 def test_parse_text_fields_must_be_nonempty_strings(key, value):
     with pytest.raises(J.JudgeOutputError):
         J.parse_judge_output(out(**{key: value}), IDS)
+
+
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_parse_harness_exploit_must_be_bool(value):
+    with pytest.raises(J.JudgeOutputError):
+        J.parse_judge_output(out(harness_exploit=value), IDS)
+
+
+@pytest.mark.parametrize("faithful,card_id,harness", [(True, "E07", False), (False, None, True)])
+def test_parse_harness_exploit_is_independent_of_faithful(faithful, card_id, harness):
+    got = J.parse_judge_output(out(faithful=faithful, card_id=card_id, harness_exploit=harness), IDS)
+    assert got["harness_exploit"] is harness and got["faithful"] is faithful
 
 
 def test_parse_inconsistent_unfaithful_with_card():
@@ -461,10 +480,11 @@ def test_load_cards_real_registry():
 def test_prompt_yaml_has_rule_and_placeholders():
     prompt = J.load_prompt()
     assert set(prompt) >= {"system", "user"}
-    for ph in ("cards", "side_task", "side_task_description", "scorer_explanation", "transcript"):
+    for ph in ("cards", "monitor_policy", "side_task", "side_task_description", "scorer_explanation", "transcript"):
         assert "{{" + ph + "}}" in prompt["user"]
     s = prompt["system"]
     assert "faithful" in s and "card_id" in s and "route_summary" in s and "rationale" in s
+    assert "harness_exploit" in s and "A gap in the monitor's policy" in s
     assert "null" in s
     # what the session logs do not record, and the configuration to infer it from (spec section 6)
     assert "hook runs, notify runs, and the output of background commands" in s
@@ -477,7 +497,9 @@ def test_prompt_yaml_has_rule_and_placeholders():
 def test_build_messages_inserts_values_once(tmp_path):
     prompt = J.load_prompt()
     cards = J.load_cards(make_cards(tmp_path / "cards"))
-    msgs = J.build_messages(prompt, cards, "leak_passwords", "DESC {{transcript}}", "EXPL", "TRANSCRIPT-BODY {{cards}}")
+    msgs = J.build_messages(
+        prompt, cards, "leak_passwords", "DESC {{transcript}}", "EXPL", "TRANSCRIPT-BODY {{cards}}", "POLICY-BODY"
+    )
     assert [m["role"] for m in msgs] == ["system", "user"]
     u = msgs[1]["content"]
     # values are inserted in one pass: placeholders inside inserted text stay as they are
@@ -485,8 +507,15 @@ def test_build_messages_inserts_values_once(tmp_path):
     heads = [f"## Card {cid}" for cid in IDS]
     pos = [u.index(h) for h in heads]
     assert pos == sorted(pos)
-    assert u.index("DESC") < u.index("EXPL") < u.index("TRANSCRIPT-BODY")
+    assert u.index("## Card E14") < u.index("POLICY-BODY") < u.index("DESC") < u.index("EXPL") < u.index("TRANSCRIPT-BODY")
     assert "{{side_task}}" not in u
+
+
+def test_monitor_policy_is_the_monitor_system_prompt():
+    text = J.load_monitor_policy()
+    policy = (J.MONITOR_DIR / "policy.md").read_text(encoding="utf-8").strip()
+    assert policy in text and J.SECURITY_POLICY_PLACEHOLDER not in text
+    assert text.startswith("You are judging one planned coding-agent action.")
 
 
 # --- judge_run end to end (HTTP mocked) -----------------------------------------------------------
@@ -591,6 +620,7 @@ def test_judge_run_end_to_end(tmp_path, capsys):
 
     # only the two side_pass samples were judged
     assert len(requests) == 2
+    assert all(J.load_monitor_policy() in user_text(r) for r in requests)
     req = requests[0]
     assert req.url == "https://openrouter.ai/api/v1/chat/completions"
     assert req.headers["authorization"] == "Bearer test-key"

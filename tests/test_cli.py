@@ -1,4 +1,4 @@
-"""Tests for the CLI (bench.__main__): summary, judge/analyze dispatch, run/preflight, missing modules."""
+"""Tests for the CLI (bench.__main__): judge/asr/plot commands, run/preflight, missing modules."""
 
 import json
 import subprocess
@@ -32,35 +32,12 @@ def make_config(
     return path
 
 
-def ci(value, low, high):
-    return {"value": value, "ci": [low, high]}
-
-
-def make_results_dir(root, run_id, cfg_path=None, summary=None):
+def make_results_dir(root, run_id, cfg_path=None):
     d = root / run_id
     d.mkdir(parents=True)
     if cfg_path is not None:
         (d / "config.yaml").write_bytes(Path(cfg_path).read_bytes())
-    if summary is not None:
-        (d / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
     return d
-
-
-FULL_SUMMARY = {
-    "run_id": "run-a",
-    "models": {"agent": "z-ai/glm-5.3", "monitor": "z-ai/glm-5.3-flash"},
-    "n_samples": 240,
-    # same layout as bench.analysis: per side task entries plus "average"; summary reads only "average"
-    "metrics": {
-        "asr_unaware": {"leak_passwords": ci(0.9, 0.8, 1.0), "average": ci(0.25, 0.2, 0.3)},
-        "asr_aware_strict": {"leak_passwords": ci(0.9, 0.8, 1.0), "average": ci(0.4, 0.35, 0.45)},
-        "asr_aware_scorer": {"leak_passwords": ci(0.9, 0.8, 1.0), "average": ci(0.5, 0.44, 0.56)},
-    },
-    "gaps": {
-        "asr_aware_strict": {"leak_passwords": ci(0.9, 0.8, 1.0), "average": ci(0.15, 0.05, 0.25)},
-        "asr_aware_scorer": {"leak_passwords": ci(0.9, 0.8, 1.0), "average": ci(-0.1, -0.2, 0.0)},
-    },
-}
 
 
 @pytest.fixture
@@ -87,223 +64,7 @@ def missing_module(monkeypatch, name):
         monkeypatch.delattr(sys.modules[package], attr, raising=False)
 
 
-# ---------------------------------------------------------------- summary
-
-
-def test_summary_prints_one_row_per_run(tmp_path, capsys):
-    cfg_a = make_config(tmp_path, "run-a", name="a.yaml")
-    cfg_b = make_config(tmp_path, "run-b", agent="x/other-agent", monitor="x/other-monitor", name="b.yaml")
-    data_b = yaml.safe_load(cfg_b.read_text(encoding="utf-8"))
-    data_b["prompts"]["aware_mode"] = "one_card"
-    cfg_b.write_text(yaml.safe_dump(data_b), encoding="utf-8")
-    second = {
-        **FULL_SUMMARY,
-        "run_id": "run-b",
-        "models": {"agent": "x/other-agent", "monitor": "x/other-monitor"},
-        "n_samples": 16,
-        "metrics": {
-            "asr_unaware": {"average": ci(0.1, 0.0, 0.2)},
-            "asr_aware_strict": {"average": ci(0.2, 0.1, 0.3)},
-            "asr_aware_scorer": {"average": ci(0.3, 0.2, 0.4)},
-        },
-        "gaps": {
-            "asr_aware_strict": {"average": ci(0.1, -0.05, 0.25)},
-            "asr_aware_scorer": {"average": ci(0.2, 0.1, 0.3)},
-        },
-    }
-    da = make_results_dir(tmp_path / "r", "run-a", cfg_a, FULL_SUMMARY)
-    db = make_results_dir(tmp_path / "r", "run-b", cfg_b, second)
-
-    assert main(["summary", str(da), str(db)]) == 0
-    lines = capsys.readouterr().out.splitlines()
-
-    assert len(lines) == 3  # header + two rows
-    header = lines[0]
-    for col in ("run", "agent", "monitor", "aware_mode", "n", "asr_unaware", "asr_aware_strict", "asr_aware_scorer", "gap_strict", "gap_scorer"):
-        assert col in header
-    row_a, row_b = lines[1], lines[2]
-    assert row_a.startswith("run-a")
-    assert "z-ai/glm-5.3" in row_a and "z-ai/glm-5.3-flash" in row_a
-    assert "240" in row_a
-    assert "all_cards" in row_a and "one_card" in row_b
-    assert "0.25 [0.20, 0.30]" in row_a
-    assert "0.40 [0.35, 0.45]" in row_a
-    assert "0.50 [0.44, 0.56]" in row_a
-    assert "+0.15 [+0.05, +0.25]" in row_a
-    assert "-0.10 [-0.20, +0.00]" in row_a
-    assert row_b.startswith("run-b")
-    assert "x/other-agent" in row_b and "x/other-monitor" in row_b
-    assert "16" in row_b
-    assert "0.10 [0.00, 0.20]" in row_b
-
-
-def test_summary_columns_are_aligned(tmp_path, capsys):
-    cfg = make_config(tmp_path, "run-a")
-    d1 = make_results_dir(tmp_path / "r", "run-a", cfg, FULL_SUMMARY)
-    d2 = make_results_dir(tmp_path / "r", "a-much-longer-run-id", cfg, FULL_SUMMARY)
-    main(["summary", str(d1), str(d2)])
-    lines = capsys.readouterr().out.splitlines()
-    starts = {line.index("z-ai/glm-5.3 ") for line in lines[1:]}
-    assert len(starts) == 1
-
-
-def test_summary_missing_keys_print_dash(tmp_path, capsys):
-    cfg = make_config(tmp_path, "run-m", agent="m/agent", monitor="m/monitor")
-    partial = {
-        "run_id": "run-m",
-        "metrics": {
-            "asr_unaware": {"average": ci(0.5, 0.4, 0.6)},
-            "asr_aware_strict": {"average": {"value": 0.7}},
-        },
-        "gaps": {},
-    }
-    d = make_results_dir(tmp_path / "r", "run-m", cfg, partial)
-    assert main(["summary", str(d)]) == 0
-    row = capsys.readouterr().out.splitlines()[1].split()
-    assert row[0] == "run-m"
-    # models fall back to config.yaml; n_samples missing
-    assert "m/agent" in row and "m/monitor" in row
-    out = " ".join(row)
-    assert "0.50 [0.40, 0.60]" in out
-    assert "0.70" in out and "0.70 [" not in out  # value without interval
-    assert "all_cards" in row  # from config.yaml
-    assert row.count("-") >= 4  # n, asr_aware_scorer, gap_strict, gap_scorer
-
-
-def test_summary_null_interval_prints_value_only(tmp_path, capsys):
-    """bench.analysis writes null for undefined numbers (e.g. an interval that could not be computed)."""
-    summary = {
-        "run_id": "run-n",
-        "metrics": {"asr_unaware": {"average": {"value": 0.5, "ci": [None, None]}}},
-        "gaps": {"asr_aware_strict": {"average": {"value": None, "ci": [None, None]}}},
-    }
-    d = make_results_dir(tmp_path / "r", "run-n", None, summary)
-    assert main(["summary", str(d)]) == 0
-    row = capsys.readouterr().out.splitlines()[1]
-    assert "0.50" in row and "0.50 [" not in row
-    assert "None" not in row
-
-
-def test_summary_reads_real_analysis_output(tmp_path, capsys):
-    """End to end on the real summary.json written by bench.analysis.analyze_run."""
-    from bench.analysis import analyze_run
-
-    run = tmp_path / "r" / "real"
-    run.mkdir(parents=True)
-    cfg = make_config(tmp_path, "real", agent="r/agent", monitor="r/monitor")
-    (run / "config.yaml").write_bytes(cfg.read_bytes())
-    side_tasks = ["download_malware", "leak_passwords", "disable_firewall", "sudo_edit"]
-    rows = []
-    for m in range(6):
-        for j, side in enumerate(side_tasks):
-            for cond in ("unaware", "aware"):
-                passed = (m + j) % 2 == 0 or cond == "aware"
-                rows.append(
-                    {
-                        "sample_id": f"{cond}__{m:03d}__{side}",
-                        "condition": cond,
-                        "main_task": f"{m:03d}",
-                        "side_task": side,
-                        "status": "ok",
-                        "side_pass": passed,
-                        "judge": {"faithful": passed, "card_id": "E01"} if cond == "aware" and passed else None,
-                    }
-                )
-    lines = [json.dumps(r) for r in rows]
-    (run / "samples.jsonl").write_text(chr(10).join(lines) + chr(10), encoding="utf-8")
-    analyze_run(run, bootstrap_seed=0, n_boot=200)
-
-    assert main(["summary", str(run)]) == 0
-    row = capsys.readouterr().out.splitlines()[1]
-    assert row.split()[0] == "real"
-    assert "r/agent" in row and "r/monitor" in row
-    assert " 48 " in row  # n_samples: 6 main tasks x 4 side tasks x 2 conditions
-    assert "-" not in row.split()  # no missing cells
-    assert row.count("[") == 5  # three ASR intervals and two gap intervals
-
-
-def test_summary_empty_summary_and_no_config(tmp_path, capsys):
-    d = make_results_dir(tmp_path / "r", "bare", None, {})
-    assert main(["summary", str(d)]) == 0
-    row = capsys.readouterr().out.splitlines()[1].split()
-    assert row[0] == "bare"
-    assert set(row[1:]) == {"-"}
-
-
-def test_summary_missing_summary_json_warns_and_prints_row(tmp_path, capsys):
-    cfg = make_config(tmp_path, "no-sum")
-    d = make_results_dir(tmp_path / "r", "no-sum", cfg, None)
-    assert main(["summary", str(d)]) == 0
-    out, err = capsys.readouterr()
-    assert out.splitlines()[1].split()[0] == "no-sum"
-    assert "summary.json" in err
-
-
-def test_summary_unreadable_summary_json_warns(tmp_path, capsys):
-    d = make_results_dir(tmp_path / "r", "bad", None, None)
-    (d / "summary.json").write_text("{not json", encoding="utf-8")
-    assert main(["summary", str(d)]) == 0
-    out, err = capsys.readouterr()
-    assert out.splitlines()[1].split()[0] == "bad"
-    assert "summary.json" in err
-
-
-def test_summary_run_id_comes_from_summary_json(tmp_path, capsys):
-    d = make_results_dir(tmp_path / "r", "folder-name", None, {**FULL_SUMMARY, "run_id": "from-json"})
-    main(["summary", str(d)])
-    assert capsys.readouterr().out.splitlines()[1].startswith("from-json")
-
-
-def test_summary_expands_wildcards_when_arg_is_not_a_path(tmp_path, capsys):
-    cfg = make_config(tmp_path, "run-a")
-    root = tmp_path / "r"
-    make_results_dir(root, "run-b", cfg, {**FULL_SUMMARY, "run_id": "run-b"})
-    make_results_dir(root, "run-a", cfg, {**FULL_SUMMARY, "run_id": "run-a"})
-    (root / "notes.txt").write_text("not a run", encoding="utf-8")
-
-    assert main(["summary", str(root / "run-*")]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert [line.split()[0] for line in lines[1:]] == ["run-a", "run-b"]  # sorted, one row each
-
-    assert main(["summary", str(root / "*")]) == 0  # files matched by the glob are skipped
-    lines = capsys.readouterr().out.splitlines()
-    assert [line.split()[0] for line in lines[1:]] == ["run-a", "run-b"]
-
-
-def test_summary_wildcard_and_literal_args_mix(tmp_path, capsys):
-    cfg = make_config(tmp_path, "run-a")
-    root = tmp_path / "r"
-    make_results_dir(root, "run-a", cfg, {**FULL_SUMMARY, "run_id": "run-a"})
-    other = make_results_dir(tmp_path / "other", "zzz", cfg, {**FULL_SUMMARY, "run_id": "zzz"})
-    assert main(["summary", str(other), str(root / "run-*")]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert [line.split()[0] for line in lines[1:]] == ["zzz", "run-a"]
-
-
-def test_summary_wildcard_without_match_prints_dash_row(tmp_path, capsys):
-    assert main(["summary", str(tmp_path / "nothing-*")]) == 0
-    out, err = capsys.readouterr()
-    assert len(out.splitlines()) == 2
-    assert "nothing-*" in out.splitlines()[1].split()[0]
-    assert "summary.json" in err
-
-
-def test_summary_existing_path_with_glob_characters_is_not_expanded(tmp_path, capsys):
-    cfg = make_config(tmp_path, "x")
-    d = make_results_dir(tmp_path / "r", "run[1]", cfg, {**FULL_SUMMARY, "run_id": "bracket"})
-    make_results_dir(tmp_path / "r", "run1", cfg, {**FULL_SUMMARY, "run_id": "plain"})
-    assert main(["summary", str(d)]) == 0
-    lines = capsys.readouterr().out.splitlines()
-    assert [line.split()[0] for line in lines[1:]] == ["bracket"]
-
-
-def test_summary_requires_at_least_one_dir(capsys):
-    with pytest.raises(SystemExit) as exc:
-        main(["summary"])
-    assert exc.value.code == 2
-
-
-# ---------------------------------------------------------------- judge / analyze dispatch
+# ---------------------------------------------------------------- judge / asr / plot commands
 
 
 def test_judge_dispatch(results, tmp_path, monkeypatch):
@@ -326,29 +87,36 @@ def test_judge_dispatch(results, tmp_path, monkeypatch):
     assert set(kwargs) == {"judge", "cards_dir"}
 
 
-def test_analyze_dispatch(results, tmp_path, monkeypatch):
-    cfg_path = make_config(tmp_path, "exp1-pilot", bootstrap=7)
-    make_results_dir(results, "exp1-pilot", cfg_path)
-    calls = []
-    fake_module(monkeypatch, "bench.analysis", analyze_run=lambda *a, **k: calls.append((a, k)))
-
-    assert main(["analyze", "exp1-pilot"]) == 0
-
-    assert calls == [((results / "exp1-pilot",), {"bootstrap_seed": 7})]
-
-
-@pytest.mark.parametrize("cmd", ["judge", "analyze"])
+@pytest.mark.parametrize("cmd", ["judge", "asr"])
 def test_unknown_run_id_exits_1(results, capsys, cmd):
     assert main([cmd, "nope"]) == 1
     assert "nope" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("cmd,module", [("judge", "bench.judge"), ("analyze", "bench.analysis")])
-def test_judge_analyze_exit_2_when_module_missing(results, tmp_path, monkeypatch, capsys, cmd, module):
+def test_judge_exit_2_when_module_missing(results, tmp_path, monkeypatch, capsys):
     make_results_dir(results, "exp1-pilot", make_config(tmp_path))
-    missing_module(monkeypatch, module)
-    assert main([cmd, "exp1-pilot"]) == 2
+    missing_module(monkeypatch, "bench.judge")
+    assert main(["judge", "exp1-pilot"]) == 2
     assert "not implemented yet" in capsys.readouterr().err
+
+
+def test_asr_without_samples_jsonl_exits_1(results, tmp_path, capsys):
+    make_results_dir(results, "exp1-pilot", make_config(tmp_path))
+    assert main(["asr", "exp1-pilot"]) == 1
+    assert "samples.jsonl" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("argv", [["plot-asr", "exp1-pilot", "--out", "x.png"], ["plot-strategies", "exp1-pilot"]])
+def test_plots_without_asr_json_point_to_the_asr_command(results, tmp_path, capsys, argv):
+    make_results_dir(results, "exp1-pilot", make_config(tmp_path))
+    assert main(argv) == 1
+    assert "python -m bench asr exp1-pilot" in capsys.readouterr().err
+
+
+def test_plot_asr_requires_out(results):
+    with pytest.raises(SystemExit) as exc:
+        main(["plot-asr", "exp1-pilot"])
+    assert exc.value.code == 2
 
 
 def test_run_dir_with_invalid_config_yaml_exits_1(results, capsys):
@@ -777,17 +545,12 @@ def test_render_prompts_can_be_repeated_and_followed_by_preflight_and_run(result
 # ---------------------------------------------------------------- entry point
 
 
-def test_python_dash_m_bench_runs_summary(tmp_path):
-    d = make_results_dir(tmp_path / "r", "run-a", None, FULL_SUMMARY)
-    r = subprocess.run(
-        [sys.executable, "-m", "bench", "summary", str(d)],
-        cwd=REPO,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
+def test_python_dash_m_bench_lists_the_commands():
+    r = subprocess.run([sys.executable, "-m", "bench", "--help"], cwd=REPO, capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stderr
-    assert "0.25 [0.20, 0.30]" in r.stdout
+    for cmd in ("judge", "asr", "plot-asr", "plot-strategies"):
+        assert cmd in r.stdout
+    assert "analyze" not in r.stdout and "summary" not in r.stdout
 
 
 def test_no_subcommand_is_usage_error():

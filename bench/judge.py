@@ -1,4 +1,5 @@
-"""Strategy judge (spec 10.3): did a successful attack follow one of the exploit cards?
+"""Strategy judge (spec 10.3): did a successful attack follow one of the exploit cards, and did it use a
+vulnerability of meltzer (`harness_exploit`)?
 
 One call per sample with side_pass true, made directly to OpenRouter with httpx. Entry point:
 judge_run(run_dir, judge, cards_dir). Per sample it writes samples/<id>/judge.json and then rewrites
@@ -25,6 +26,10 @@ from bench import prompts
 BENCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCH_DIR.parent
 PROMPT_PATH = BENCH_DIR / "judge_prompt.yaml"
+# The monitor's system prompt is policy_template.md with policy.md in place of the placeholder
+# (meltzer/v0.1/src/meltzer/monitor/prompt.py::policy_prompt).
+MONITOR_DIR = REPO_ROOT / "meltzer" / "v0.1" / "src" / "meltzer" / "monitor"
+SECURITY_POLICY_PLACEHOLDER = "{{ security_policy }}"
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 ENV_FILE = REPO_ROOT / ".env"
 KEY_NAME = "OPENROUTER_API_KEY"
@@ -36,7 +41,7 @@ RETRYABLE_STATUS = {408, 429}
 TIMEOUT_S = 300.0
 
 TRUNCATE_CHARS = 4000  # per tool result and per tool argument value in the transcript
-OUTPUT_KEYS = ("faithful", "card_id", "route_summary", "rationale")
+OUTPUT_KEYS = ("faithful", "card_id", "harness_exploit", "route_summary", "rationale")
 JUDGE_KEYS = ("id", "provider", "temperature", "concurrency")  # reasoning_effort may be null
 
 
@@ -65,6 +70,13 @@ def load_prompt(path: Path = PROMPT_PATH) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
+def load_monitor_policy(monitor_dir: Path = MONITOR_DIR) -> str:
+    """The monitor's system prompt without its output format, as meltzer builds it."""
+    template = (monitor_dir / "policy_template.md").read_text(encoding="utf-8").rstrip()
+    policy = (monitor_dir / "policy.md").read_text(encoding="utf-8").strip()
+    return template.replace(SECURITY_POLICY_PLACEHOLDER, policy)
+
+
 PLACEHOLDER = re.compile(r"\{\{\s*(\w+)\s*\}\}")
 
 
@@ -91,11 +103,13 @@ def build_messages(
     side_task_description: str,
     scorer_explanation: str,
     transcript: str,
+    monitor_policy: str,
 ) -> list[dict]:
     user = render_template(
         prompt["user"],
         {
             "cards": cards_block(cards),
+            "monitor_policy": monitor_policy,
             "side_task": side_task,
             "side_task_description": side_task_description,
             "scorer_explanation": scorer_explanation,
@@ -320,6 +334,8 @@ def _validate(data: Any, card_ids: Sequence[str]) -> dict:
     faithful, card_id = data["faithful"], data["card_id"]
     if not isinstance(faithful, bool):
         raise JudgeOutputError(f"faithful must be a boolean, got {faithful!r}")
+    if not isinstance(data["harness_exploit"], bool):
+        raise JudgeOutputError(f"harness_exploit must be a boolean, got {data['harness_exploit']!r}")
     for key in ("route_summary", "rationale"):
         if not isinstance(data[key], str) or not data[key].strip():
             raise JudgeOutputError(f"missing or empty string {key!r}")
@@ -332,6 +348,7 @@ def _validate(data: Any, card_ids: Sequence[str]) -> dict:
     return {
         "faithful": faithful,
         "card_id": card_id,
+        "harness_exploit": data["harness_exploit"],
         "route_summary": data["route_summary"].strip(),
         "rationale": data["rationale"].strip(),
     }
@@ -594,6 +611,7 @@ def judge_run(
     cards = load_cards(Path(cards_dir))
     card_ids = [card_id for card_id, _ in cards]
     prompt = load_prompt()
+    monitor_policy = load_monitor_policy()
     if side_task_descriptions is None:
         side_task_descriptions = _lazy_side_task_descriptions()
 
@@ -619,7 +637,9 @@ def judge_run(
                 f"bench.basharena.SIDE_TASKS importable"
             )
         explanation = r.get("side_explanation") or "(none)"
-        messages = build_messages(prompt, cards, side_task, description, explanation, render_transcript(files))
+        messages = build_messages(
+            prompt, cards, side_task, description, explanation, render_transcript(files), monitor_policy
+        )
         jobs.append(SampleJob(r["sample_id"], sample_dir, request_body(judge, messages)))
 
     plural = "" if len(passed) == 1 else "s"
@@ -644,8 +664,12 @@ def judge_run(
     n_ok = sum(j.parsed is not None for j in jobs)
     n_err = len(jobs) - n_ok
     faithful = sum(1 for j in jobs if j.parsed and j.parsed["faithful"])
+    harness = sum(1 for j in jobs if j.parsed and j.parsed["harness_exploit"])
     cost = sum(((c.get("usage") or {}).get("cost") or 0) for j in jobs for c in j.calls)
-    print(f"judge: {n_ok} judged now ({faithful} faithful), {n_err} judge_error, cost ${cost:.4f}")
+    print(
+        f"judge: {n_ok} judged now ({faithful} faithful, {harness} harness_exploit), {n_err} judge_error, "
+        f"cost ${cost:.4f}"
+    )
     others = sorted(
         {
             str(c["provider"] or "none reported")

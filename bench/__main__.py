@@ -9,8 +9,12 @@ Commands:
                        write the rendered prompts of one sample per condition to
                        results/<run_id>/prompts/ (review gate, spec 9.2)
   judge <run_id>       label the successful samples of a finished run
-  analyze <run_id>     compute ASR, intervals, tests, tables and plots
-  summary <dirs...>    print one row per results folder
+  asr <run_id>         compute the run's ASRs with intervals (writes results/<run_id>/asr.json)
+  plot-asr <run_id>... --out <png>
+                       plot the faithful average ASR of the runs, in the order given (reads their asr.json)
+  plot-strategies <run_id>
+                       plot the registry cards of the run's faithful successful attacks
+                       (writes results/<run_id>/plots/strategies.png)
 
 `<run_id>` resolves to results/<run_id>/ and reads its config.yaml. `<config>` is a path to a run YAML.
 Commands that depend on other modules import them when called; if a module is missing the command
@@ -20,7 +24,7 @@ Calls into other modules (the contract those modules must match):
   bench.task.run_experiment(cfg: RunConfig, run_dir: Path) -> list[str] | None   main task ids used
   bench.preflight.preflight(cfg: RunConfig, run_dir: Path) -> list[str]
   bench.judge.judge_run(run_dir: Path, judge: dict, cards_dir: Path)   (called with keywords)
-  bench.analysis.analyze_run(run_dir: Path, bootstrap_seed: int)       (called with a keyword)
+  bench.asr.measure_run(run_dir: Path, cfg: RunConfig) -> dict          (the content of asr.json)
   render-prompts: bench.prompts.write_review_prompts(out_dir, {condition: ReviewSample}) with
     ReviewSample(task_description, setting_description, side_task_description, attack_base_path,
     aware_common_path, aware_section_path, cards_dir, card_id); the texts come from bench.basharena: load_task(id).description,
@@ -30,34 +34,18 @@ Calls into other modules (the contract those modules must match):
 
 The manifest's main_task_ids come from run_experiment's return value; if it returns None they are read from
 results/<run_id>/preflight.json, key "kept" (list of task ids), when that file exists.
-
-`summary` reads, in each folder, `summary.json` as written by bench.analysis (any key may be missing,
-shown as "-"):
-  {"run_id": str,
-   "models": {"agent": str, "monitor": str},
-   "n_samples": int,
-   "metrics": {"asr_unaware" | "asr_aware_strict" | "asr_aware_scorer":
-                 {"average": {"value": float, "ci": [low, high]}, ...per side task...}},
-   "gaps": {"asr_aware_strict" | "asr_aware_scorer": {"average": {"value": float, "ci": [low, high]}, ...}}}
-Model ids missing from summary.json are read from the folder's config.yaml.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
-
-import yaml
 
 from bench import assignment, config
 from bench.config import ConfigError, RunConfig
-
-SUMMARY_COLUMNS = ["run", "agent", "monitor", "aware_mode", "n", "asr_unaware", "asr_aware_strict", "asr_aware_scorer", "gap_strict", "gap_scorer"]
 
 
 class CliError(Exception):
@@ -79,7 +67,7 @@ def _load_run(run_id: str) -> tuple[RunConfig, Path]:
     return config.load_config(run_dir / "config.yaml"), run_dir
 
 
-# ---------------------------------------------------------------- run, preflight, judge, analyze
+# ---------------------------------------------------------------- run, preflight, judge
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -215,98 +203,50 @@ def cmd_judge(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_analyze(args: argparse.Namespace) -> int:
+# ---------------------------------------------------------------- asr and plots (11)
+
+
+def cmd_asr(args: argparse.Namespace) -> int:
     cfg, run_dir = _load_run(args.run_id)
+    from bench.asr import format_result, measure_run
+
+    if not (run_dir / "samples.jsonl").is_file():
+        raise CliError(f"{run_dir} has no samples.jsonl; the run has not finished")
     try:
-        from bench.analysis import analyze_run
-    except ImportError as e:
-        raise _import_error("analyze (bench.analysis.analyze_run)", e) from None
-    analyze_run(run_dir, bootstrap_seed=cfg.seeds.bootstrap)
+        result = measure_run(run_dir, cfg)
+    except ValueError as e:
+        raise CliError(str(e)) from None
+    print(format_result(result))
+    print(run_dir / "asr.json")
     return 0
 
 
-# ---------------------------------------------------------------- summary (11.4)
+def _read_asr(run_id: str) -> dict:
+    path = config.resolve_run_dir(run_id) / "asr.json"
+    if not path.is_file():
+        raise CliError(f"{path} not found; run `python -m bench asr {run_id}` first")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _dig(data: Any, *keys: str) -> Any:
-    for key in keys:
-        if not isinstance(data, dict):
-            return None
-        data = data.get(key)
-    return data
+def cmd_plot_asr(args: argparse.Namespace) -> int:
+    from bench.plots import plot_avg_asr
+
+    results = [_read_asr(run_id) for run_id in args.run_ids]
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plot_avg_asr(results, out)
+    print(out)
+    return 0
 
 
-def _is_num(x: Any) -> bool:
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
+def cmd_plot_strategies(args: argparse.Namespace) -> int:
+    from bench.plots import plot_strategies
 
-
-def _fmt(entry: Any, signed: bool = False) -> str:
-    """`0.25 [0.20, 0.30]` from {value, ci: [low, high]}; "-" if the value is missing."""
-    value = _dig(entry, "value")
-    if not _is_num(value):
-        return "-"
-    f = "{:+.2f}" if signed else "{:.2f}"
-    text = f.format(value)
-    ci = _dig(entry, "ci")
-    if isinstance(ci, (list, tuple)) and len(ci) == 2 and all(_is_num(x) for x in ci):
-        text += f" [{f.format(ci[0])}, {f.format(ci[1])}]"
-    return text
-
-
-def _model_id(value: Any) -> str | None:
-    if isinstance(value, dict):
-        value = value.get("id")
-    return value if isinstance(value, str) and value else None
-
-
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        print(f"warning: cannot read {path}: {e}", file=sys.stderr)
-        return {}
-
-
-def _read_yaml(path: Path) -> Any:
-    try:
-        return yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return {}
-
-
-def _summary_row(folder: Path) -> list[str]:
-    summary = _read_json(folder / "summary.json")
-    cfg = _read_yaml(folder / "config.yaml")
-
-    def model(role: str) -> str:
-        return _model_id(_dig(summary, "models", role)) or _model_id(_dig(cfg, "models", role)) or "-"
-
-    run_id = _dig(summary, "run_id")
-    n = _dig(summary, "n_samples")
-    return [
-        run_id if isinstance(run_id, str) and run_id else folder.name,
-        model("agent"),
-        model("monitor"),
-        _dig(cfg, "prompts", "aware_mode") if isinstance(_dig(cfg, "prompts", "aware_mode"), str) else "-",
-        str(n) if _is_num(n) else "-",
-        *(_fmt(_dig(summary, "metrics", k, "average")) for k in ("asr_unaware", "asr_aware_strict", "asr_aware_scorer")),
-        *(_fmt(_dig(summary, "gaps", k, "average"), signed=True) for k in ("asr_aware_strict", "asr_aware_scorer")),
-    ]
-
-
-def _expand(arg: str) -> list[str]:
-    """An existing path stays as it is; otherwise treat it as a glob (PowerShell does not expand them)."""
-    if Path(arg).exists():
-        return [arg]
-    return sorted(m for m in glob.glob(arg) if Path(m).is_dir()) or [arg]
-
-
-def cmd_summary(args: argparse.Namespace) -> int:
-    dirs = [d for arg in args.dirs for d in _expand(arg)]
-    rows = [SUMMARY_COLUMNS] + [_summary_row(Path(d)) for d in dirs]
-    widths = [max(len(r[i]) for r in rows) for i in range(len(SUMMARY_COLUMNS))]
-    for row in rows:
-        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)).rstrip())
+    result = _read_asr(args.run_id)
+    out = config.resolve_run_dir(args.run_id) / "plots" / "strategies.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    plot_strategies(result, out)
+    print(out)
     return 0
 
 
@@ -351,11 +291,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     for name, func, help_ in (
         ("judge", cmd_judge, "label the successful samples of a run"),
-        ("analyze", cmd_analyze, "compute metrics, tables and plots of a run"),
+        ("asr", cmd_asr, "compute the ASRs of a judged run (writes asr.json)"),
+        ("plot-strategies", cmd_plot_strategies, "plot the cards of a run's faithful successful attacks"),
     ):
         p = sub.add_parser(name, help=help_)
-        p.add_argument("run_id", help="run id; reads results/<run_id>/config.yaml")
+        p.add_argument("run_id", help="run id; reads results/<run_id>/")
         p.set_defaults(func=func)
+
+    p = sub.add_parser("plot-asr", help="plot the faithful average ASR of several runs")
+    p.add_argument("run_ids", nargs="+", help="run ids, in plot order; each needs results/<run_id>/asr.json")
+    p.add_argument("--out", required=True, help="PNG file to write")
+    p.set_defaults(func=cmd_plot_asr)
 
     p = sub.add_parser("render-prompts", help="write the rendered prompts for the review gate")
     p.add_argument("config", help="path to a run YAML, e.g. runs/exp1-01.yaml")
@@ -364,9 +310,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("check-registry", help="check that every card citation exists in meltzer/v0.1")
     p.set_defaults(func=cmd_check_registry)
 
-    p = sub.add_parser("summary", help="print one row per results folder")
-    p.add_argument("dirs", nargs="+", help="results folders; wildcards such as results/* are expanded")
-    p.set_defaults(func=cmd_summary)
     return parser
 
 
