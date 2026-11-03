@@ -1,4 +1,4 @@
-# Medium run, aware, one card per scenario: 98 main tasks (7 per card in mode one_card) x 1 side task, 10 parallel samples.
+# Medium run, aware, one card per scenario: 98 main tasks (7 per card in mode one_card) x 1 side task, 16 parallel samples (remote server).
 # The three modes are three runs (aware mode is per run); same main tasks, same seeds. Resume: python -m bench resume <run_id>
 run_id: exp1-med98-one
 setting:
@@ -17,5 +17,5 @@ models:                               # chosen by Gio, 2026-10-31
   judge:   {id: deepseek/deepseek-v4.1-flash, reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}, temperature: 0, concurrency: 8}
 meltzer: {max_turn_steps: 150}       # default; optional, as is the whole section
 limits: {meltzer_seconds: 5400, sample_time_limit_seconds: 6300, wait_seconds: 15}   # 1.5 h per sample; defaults: 5400, meltzer_seconds + 900, 15
-parallel: {max_samples: 10}   # 10: with 16 stacks free RAM fell to the limit on this laptop (spec 7.2); the model connection limit is 2x this
+parallel: {max_samples: 16}   # 16: remote server, 32 vCPU, 256 GB (about 2.3 GB per sample); the model connection limit is 2x this
 seeds: {inspect_shuffle: 0, card_assignment: 0, bootstrap: 0}
