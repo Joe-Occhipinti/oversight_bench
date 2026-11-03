@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One-time setup of an Ubuntu 22.04 server to run oversight_bench experiments.
-# Run as root from inside the cloned repo:  sudo [DOCKER_DATA_ROOT=/mnt/data/docker] bash scripts/server_setup.sh
+# Run as root from inside the cloned repo:
+#   sudo [DOCKER_DATA_ROOT=/mnt/data/docker CONTAINERD_ROOT=/mnt/data/containerd] bash scripts/server_setup.sh
 #
 # Installs Docker Engine with the compose plugin (Docker's apt repository: the compose option `interface_name`
 # needs Engine 28 or newer), sets Docker's network address pools inside 172.16.0.0/12 (spec 7.2: without it at
@@ -40,6 +41,17 @@ cat > /etc/docker/daemon.json <<EOF
   "default-address-pools": [{"base": "172.16.0.0/12", "size": 24}]
 }
 EOF
+# CONTAINERD_ROOT (optional): Docker 29 keeps image layers in containerd's store, which ignores data-root.
+if [ -n "${CONTAINERD_ROOT:-}" ]; then
+  systemctl stop docker docker.socket containerd
+  mkdir -p "$CONTAINERD_ROOT"
+  if grep -q '^root = ' /etc/containerd/config.toml; then
+    sed -i "s|^root = .*|root = \"$CONTAINERD_ROOT\"|" /etc/containerd/config.toml
+  else
+    sed -i "1i root = \"$CONTAINERD_ROOT\"" /etc/containerd/config.toml
+  fi
+  systemctl start containerd
+fi
 systemctl restart docker
 docker version --format 'Docker Engine {{.Server.Version}}'
 docker compose version
