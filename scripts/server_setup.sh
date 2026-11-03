@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One-time setup of an Ubuntu 22.04 server to run oversight_bench experiments.
-# Run as root from inside the cloned repo:  sudo bash scripts/server_setup.sh
+# Run as root from inside the cloned repo:  sudo [DOCKER_DATA_ROOT=/mnt/data/docker] bash scripts/server_setup.sh
 #
 # Installs Docker Engine with the compose plugin (Docker's apt repository: the compose option `interface_name`
 # needs Engine 28 or newer), sets Docker's network address pools inside 172.16.0.0/12 (spec 7.2: without it at
@@ -31,8 +31,12 @@ if ip -4 -o addr show | grep -E ' inet 172\.(1[6-9]|2[0-9]|3[01])\.' | grep -v d
   echo "WARNING: a host interface above is inside 172.16.0.0/12; sample networks may collide with it" >&2
 fi
 if [ -f /etc/docker/daemon.json ]; then cp /etc/docker/daemon.json /etc/docker/daemon.json.bak; fi
-cat > /etc/docker/daemon.json <<'EOF'
+# DOCKER_DATA_ROOT (optional): where Docker keeps images and containers, e.g. a folder on a large data disk.
+data_root=""
+if [ -n "${DOCKER_DATA_ROOT:-}" ]; then mkdir -p "$DOCKER_DATA_ROOT"; data_root="\"data-root\": \"$DOCKER_DATA_ROOT\","; fi
+cat > /etc/docker/daemon.json <<EOF
 {
+  $data_root
   "default-address-pools": [{"base": "172.16.0.0/12", "size": 24}]
 }
 EOF
