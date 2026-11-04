@@ -16,6 +16,7 @@ WAIT_SECONDS="${WAIT_SECONDS:-600}"  # before each resume: gives a provider outa
 
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.local/bin:$PATH"
+if [ -f .env ]; then set -a; . ./.env; set +a; fi  # OPENROUTER_API_KEY: Inspect reads it from the environment
 ulimit -n 65536 2>/dev/null || true  # many parallel docker subprocesses
 mkdir -p results
 exec > >(tee -a "results/$RUN_ID-unattended.log") 2>&1
