@@ -282,15 +282,25 @@ def _session_start(session: _Session, description: str) -> tuple[str, str]:
     return "SESSION START", "\n".join(lines)
 
 
-def render_transcript(session_files: list[Path]) -> str:
-    """All sessions of a sample as one sequence in time order, with one entry numbering.
+@dataclass
+class Row:
+    """One log record of a sample, placed in the time order of all its sessions."""
 
-    Records are ordered by `created_at` (items) or `timestamp` (events); within a session the log order
-    is kept. Each entry header has the time and the session (S1, S2, ...).
-    """
+    when: datetime
+    session: int  # index in session start order
+    seq: int  # line index within the session's log (blank lines skipped)
+    tag: str  # "S1 main", "S2 subagent", ...
+    description: str  # of the session, for its start entry
+    session_data: _Session
+    rec: dict
+
+
+def ordered_rows(session_files: list[Path]) -> list[Row]:
+    """All records of all sessions of a sample, ordered by `created_at` (items) or `timestamp` (events);
+    within a session the log order is kept."""
     sessions = sorted((_read_session(Path(p)) for p in session_files), key=_Session.start_key)
     index_of = {s.id: i for i, s in enumerate(sessions)}
-    rows = []  # (time, session index, sequence number, tag, header, body)
+    rows: list[Row] = []
     main_seen = False
     for si, session in enumerate(sessions):
         if session.parent:
@@ -308,14 +318,30 @@ def render_transcript(session_files: list[Path]) -> str:
         for seq, rec in enumerate(session.records):
             when = max(_parse_time(rec.get("created_at") or rec.get("timestamp")) or previous, previous)
             previous = when
-            entry = _session_start(session, description) if rec.get("type") == "session_meta" else _entry(rec)
-            if entry is not None:
-                rows.append((when, si, seq, tag, entry[0], entry[1]))
-    rows.sort(key=lambda r: r[:3])
-    entries = [
-        f"[{n}] {_format_time(when)} {tag} {header}\n{_indent(body.rstrip())}"
-        for n, (when, _, _, tag, header, body) in enumerate(rows, start=1)
-    ]
+            rows.append(Row(when, si, seq, tag, description, session, rec))
+    rows.sort(key=lambda r: (r.when, r.session, r.seq))
+    return rows
+
+
+def row_entry(row: Row) -> tuple[str, str] | None:
+    """(header, body) of a record as the judge renders it; None for records that are not rendered (reasoning)."""
+    if row.rec.get("type") == "session_meta":
+        return _session_start(row.session_data, row.description)
+    return _entry(row.rec)
+
+
+def render_transcript(session_files: list[Path]) -> str:
+    """All sessions of a sample as one sequence in time order, with one entry numbering.
+
+    Records are ordered by `created_at` (items) or `timestamp` (events); within a session the log order
+    is kept. Each entry header has the time and the session (S1, S2, ...).
+    """
+    entries = []
+    for row in ordered_rows(session_files):
+        entry = row_entry(row)
+        if entry is not None:
+            header, body = entry
+            entries.append(f"[{len(entries) + 1}] {_format_time(row.when)} {row.tag} {header}\n{_indent(body.rstrip())}")
     return "\n\n".join(entries) if entries else "(no entries)"
 
 
@@ -368,11 +394,11 @@ def parse_judge_output(text: str, card_ids: Sequence[str]) -> dict:
 # --- API key ------------------------------------------------------------------------------------
 
 
-def load_api_key(env_file: Path | None = None) -> str | None:
-    """OPENROUTER_API_KEY from the environment, else from the .env file. None if absent."""
+def env_value(key: str, env_file: Path | None = None) -> str | None:
+    """`key` from the environment, else from the .env file. None if absent."""
     env_file = ENV_FILE if env_file is None else env_file
-    if os.environ.get(KEY_NAME):
-        return os.environ[KEY_NAME]
+    if os.environ.get(key):
+        return os.environ[key]
     if not env_file.is_file():
         return None
     for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -380,9 +406,14 @@ def load_api_key(env_file: Path | None = None) -> str | None:
         if line.startswith("export "):
             line = line[len("export ") :].strip()
         name, sep, value = line.partition("=")
-        if sep and name.strip() == KEY_NAME:
+        if sep and name.strip() == key:
             return value.strip().strip("'\"") or None
     return None
+
+
+def load_api_key(env_file: Path | None = None) -> str | None:
+    """OPENROUTER_API_KEY from the environment, else from the .env file. None if absent."""
+    return env_value(KEY_NAME, env_file)
 
 
 # --- calls --------------------------------------------------------------------------------------

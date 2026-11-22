@@ -15,6 +15,18 @@ Commands:
   plot-strategies <run_id>
                        plot the registry cards of the run's faithful successful attacks
                        (writes results/<run_id>/plots/strategies.png)
+  docent-upload <run_id>
+                       upload the run's samples to the Docent collection DOCENT_COLLECTION_ID
+                       (needs DOCENT_API_KEY; writes results/<run_id>/docent.json)
+  failure-extract <run_id> [--limit N]
+                       run the extraction reading on the uploaded run's samples
+                       (writes results/<run_id>/failure_extract.jsonl)
+  failure-taxonomy <run_id>... [--out DIR]
+                       propose categories for each free-text field of the runs' extraction outputs
+                       (writes DIR/proposal.json and DIR/proposal.md; default results/failure-taxonomy)
+  plot-failures <run_id>... [--taxonomy DIR] [--out DIR]
+                       plot the failure and decision analysis of the runs, in the order given
+                       (default output results/failure-analysis)
 
 `<run_id>` resolves to results/<run_id>/ and reads its config.yaml. `<config>` is a path to a run YAML.
 Commands that depend on other modules import them when called; if a module is missing the command
@@ -250,6 +262,80 @@ def cmd_plot_strategies(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_docent_upload(args: argparse.Namespace) -> int:
+    from bench.docent_upload import upload_run
+
+    cfg, run_dir = _load_run(args.run_id)
+    if not (run_dir / "samples.jsonl").is_file():
+        raise CliError(f"{run_dir} has no samples.jsonl; the run has not finished")
+    client, collection_id = _docent_client()
+    try:
+        upload_run(run_dir, cfg, client, collection_id)
+    except ValueError as e:
+        raise CliError(str(e)) from None
+    print(run_dir / "docent.json")
+    return 0
+
+
+def _docent_client():
+    from docent import Docent
+
+    from bench.judge import env_value
+
+    values = {k: env_value(k) for k in ("DOCENT_API_KEY", "DOCENT_COLLECTION_ID")}
+    missing = [k for k, v in values.items() if not v]
+    if missing:
+        raise CliError(f"{', '.join(missing)} not set (put them in .env)")
+    return Docent(api_key=values["DOCENT_API_KEY"]), values["DOCENT_COLLECTION_ID"]
+
+
+def cmd_failure_extract(args: argparse.Namespace) -> int:
+    from bench.failures import OUT_FILE, extract_run, format_summary
+
+    cfg, run_dir = _load_run(args.run_id)
+    if not (run_dir / "docent.json").is_file():
+        raise CliError(f"{run_dir} has no docent.json; run `python -m bench docent-upload {args.run_id}` first")
+    client, collection_id = _docent_client()
+    try:
+        rows = extract_run(run_dir, cfg, client, collection_id, limit=args.limit)
+    except ValueError as e:
+        raise CliError(str(e)) from None
+    print(format_summary(rows))
+    print(run_dir / OUT_FILE)
+    return 0
+
+
+def cmd_failure_taxonomy(args: argparse.Namespace) -> int:
+    from bench.failure_taxonomy import propose
+    from bench.failures import OUT_FILE
+
+    runs = [(run_dir, cfg) for cfg, run_dir in map(_load_run, args.run_ids)]
+    missing = [str(run_dir / OUT_FILE) for run_dir, _ in runs if not (run_dir / OUT_FILE).is_file()]
+    if missing:
+        raise CliError(f"no extraction output: {', '.join(missing)}; run `python -m bench failure-extract` first")
+    client, collection_id = _docent_client()
+    out_dir = Path(args.out)
+    proposal = propose(runs, client, collection_id, out_dir)
+    for field, data in proposal["fields"].items():
+        out = data.get("output") or {}
+        print(f"{field}: {len(data['values'])} values, {len(out.get('categories') or [])} categories, "
+              f"{data.get('status')}, tokens in {data.get('input_tokens')} out {data.get('output_tokens')}")  # fmt: skip
+    print(out_dir / "proposal.md")
+    return 0
+
+
+def cmd_plot_failures(args: argparse.Namespace) -> int:
+    from bench.failure_plots import plot_all
+
+    runs = [(run_dir, cfg) for cfg, run_dir in map(_load_run, args.run_ids)]
+    proposal_path = Path(args.taxonomy) / "proposal.json"
+    proposal = json.loads(proposal_path.read_text(encoding="utf-8")) if proposal_path.is_file() else None
+    out = Path(args.out)
+    plot_all(runs, proposal, out)
+    print(out)
+    return 0
+
+
 def cmd_check_registry(args: argparse.Namespace) -> int:
     from bench.registry_check import check_registry
 
@@ -293,10 +379,28 @@ def build_parser() -> argparse.ArgumentParser:
         ("judge", cmd_judge, "label the successful samples of a run"),
         ("asr", cmd_asr, "compute the ASRs of a judged run (writes asr.json)"),
         ("plot-strategies", cmd_plot_strategies, "plot the cards of a run's faithful successful attacks"),
+        ("docent-upload", cmd_docent_upload, "upload a run's samples to the Docent collection"),
     ):
         p = sub.add_parser(name, help=help_)
         p.add_argument("run_id", help="run id; reads results/<run_id>/")
         p.set_defaults(func=func)
+
+    p = sub.add_parser("failure-extract", help="run the Docent extraction reading on an uploaded run")
+    p.add_argument("run_id", help="run id; reads results/<run_id>/docent.json")
+    p.add_argument("--limit", type=int, default=None, help="at most this many samples per side task (trial)")
+    p.set_defaults(func=cmd_failure_extract)
+
+    p = sub.add_parser("failure-taxonomy", help="propose categories for the extraction fields of several runs")
+    p.add_argument("run_ids", nargs="+", help="run ids; each needs results/<run_id>/failure_extract.jsonl")
+    p.add_argument("--out", default=str(config.REPO_ROOT / "results" / "failure-taxonomy"), help="output folder")
+    p.set_defaults(func=cmd_failure_taxonomy)
+
+    p = sub.add_parser("plot-failures", help="plot the failure and decision analysis of several runs")
+    p.add_argument("run_ids", nargs="+", help="run ids, in plot order; each needs asr.json and failure_extract.jsonl")
+    p.add_argument("--taxonomy", default=str(config.REPO_ROOT / "results" / "failure-taxonomy"),
+                   help="folder with proposal.json (skipped if absent)")  # fmt: skip
+    p.add_argument("--out", default=str(config.REPO_ROOT / "results" / "failure-analysis"), help="output folder")
+    p.set_defaults(func=cmd_plot_failures)
 
     p = sub.add_parser("plot-asr", help="plot the faithful average ASR of several runs")
     p.add_argument("run_ids", nargs="+", help="run ids, in plot order; each needs results/<run_id>/asr.json")
