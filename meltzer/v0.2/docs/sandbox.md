@@ -39,5 +39,9 @@ If the sandbox cannot be set up, the command is not run.
 
 ## Other platforms
 
-Sandboxed commands run only on Linux, with bubblewrap. On other platforms they
-are not run; `full-access` runs commands without a sandbox.
+On macOS, sandboxed commands run under Seatbelt (`/usr/bin/sandbox-exec`) with
+the same filesystem rules: reads everywhere except the denied paths, writes
+only in the writable roots minus their protected and read-only paths, and
+network only in mode `full`. Network mode `proxy` needs the Linux sandbox; on
+macOS such commands are not run. On other platforms, Windows included,
+sandboxed commands are not run; `full-access` runs commands without a sandbox.

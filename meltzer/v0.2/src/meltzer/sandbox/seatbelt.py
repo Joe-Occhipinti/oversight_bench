@@ -6,8 +6,8 @@ The policy, in order:
   (allow file-read*)          reads everywhere, or everywhere except the denied paths
   (allow file-write* ...)     each writable root, minus its protected and read-only
                               paths (the path itself and everything below it)
-  network                     none: nothing; full: all traffic; proxy: only the
-                              Unix socket of the command's network proxy
+  network                     none or proxy: nothing (network mode proxy needs the
+                              Linux sandbox); full: all traffic
 
 Paths never appear in the policy text: each one is a parameter (-DKEY=path)
 that the policy refers to as (param "KEY").
@@ -23,7 +23,6 @@ from meltzer.sandbox.policy import PROTECTED_NAMES, NetworkMode, SandboxPolicy, 
 
 # Only this sandbox-exec is used, never one found on PATH.
 SEATBELT_EXECUTABLE = "/usr/bin/sandbox-exec"
-PROXY_SOCKET_PARAM = "PROXY_SOCKET_DIR"
 
 
 def _policy_file(name: str) -> str:
@@ -58,10 +57,8 @@ def _check_paths(policy: SandboxPolicy) -> None:
             raise SandboxSetupError(f"protected path {path} is a symlink")
 
 
-def build_seatbelt_policy(
-    policy: SandboxPolicy, cwd: Path, *, proxy_dir: Path | None = None
-) -> tuple[str, dict[str, str]]:
-    """Return (policy text, parameters). `proxy_dir`: host directory with the network proxy socket."""
+def build_seatbelt_policy(policy: SandboxPolicy, cwd: Path) -> tuple[str, dict[str, str]]:
+    """Return (policy text, parameters)."""
     if not policy.is_sandboxed:
         raise SandboxSetupError(f"sandbox mode {policy.mode} does not use a sandbox")
     if not policy.can_read(cwd):
@@ -86,21 +83,12 @@ def build_seatbelt_policy(
     network_rule = ""
     if policy.network == NetworkMode.FULL:
         network_rule = "(allow network-outbound)\n(allow network-inbound)\n" + _policy_file("network_policy.sbpl")
-    elif policy.network == NetworkMode.PROXY and proxy_dir is not None:
-        params[PROXY_SOCKET_PARAM] = str(proxy_dir)
-        network_rule = (
-            "(allow system-socket (socket-domain AF_UNIX))\n"
-            f'(allow network-outbound (remote unix-socket (subpath (param "{PROXY_SOCKET_PARAM}"))))\n'
-            + _policy_file("network_policy.sbpl")
-        )
 
     sections = [_policy_file("base_policy.sbpl"), read_rule, write_rule, network_rule]
     return "\n".join(section for section in sections if section), params
 
 
-def seatbelt_command(
-    policy: SandboxPolicy, command: list[str], cwd: Path, *, proxy_dir: Path | None = None
-) -> list[str]:
+def seatbelt_command(policy: SandboxPolicy, command: list[str], cwd: Path) -> list[str]:
     """The sandbox-exec argv that runs `command` under the policy."""
-    text, params = build_seatbelt_policy(policy, cwd, proxy_dir=proxy_dir)
+    text, params = build_seatbelt_policy(policy, cwd)
     return [SEATBELT_EXECUTABLE, "-p", text, *(f"-D{key}={value}" for key, value in params.items()), "--", *command]

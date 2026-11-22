@@ -1,4 +1,4 @@
-"""Command sandboxing: bubblewrap on Linux.
+"""Command sandboxing: bubblewrap on Linux, Seatbelt (sandbox-exec) on macOS.
 
 The backend follows the platform (sys.platform), never the configuration. On
 a platform without a backend, sandboxed commands are refused.

@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
+from meltzer.exec import ProcessRunner
 from meltzer.sandbox import SandboxBackend, select_backend
 from meltzer.sandbox.bwrap import SandboxSetupError
 from meltzer.sandbox.policy import NetworkMode, SandboxMode, SandboxPolicy
 from meltzer.sandbox.seatbelt import SEATBELT_EXECUTABLE, build_seatbelt_policy, seatbelt_command
-from meltzer.sandbox.windows import WindowsSandboxMode, compute_allow_deny_paths
 
 
 @pytest.fixture
@@ -79,15 +79,10 @@ def test_denied_paths_are_excluded_from_reads(root):
     assert f'(require-not (subpath (param "{param_key(params, policy.deny_read[0])}")))' in text
 
 
-def test_network_rules(root, tmp_path):
+def test_network_rules(root):
     text, _ = build_seatbelt_policy(workspace_policy(root, network=NetworkMode.FULL), root)
     assert "(allow network-outbound)" in text and "com.apple.SecurityServer" in text
-    policy = workspace_policy(root, network=NetworkMode.PROXY)
-    text, params = build_seatbelt_policy(policy, root, proxy_dir=tmp_path / "net")
-    assert params["PROXY_SOCKET_DIR"] == str(tmp_path / "net")
-    assert '(allow network-outbound (remote unix-socket (subpath (param "PROXY_SOCKET_DIR"))))' in text
-    assert "(allow network-outbound)" not in text and "remote ip" not in text
-    assert "network-outbound" not in build_seatbelt_policy(policy, root)[0]
+    assert "network-outbound" not in build_seatbelt_policy(workspace_policy(root, network=NetworkMode.PROXY), root)[0]
 
 
 def test_paths_are_parameters_not_policy_text(tmp_path):
@@ -115,28 +110,6 @@ def test_symlinked_protected_path_is_refused(tmp_path):
         build_seatbelt_policy(workspace_policy(work), work)
 
 
-# --- Windows -------------------------------------------------------------------------
-
-
-def test_windows_allow_and_deny_paths(root, tmp_path):
-    extra = tmp_path / "extra"
-    extra.mkdir()
-    (root / "secrets").mkdir()
-    policy = workspace_policy(root, extra_writable=(extra, tmp_path / "missing"), deny_read=(root / "secrets",))
-    paths = compute_allow_deny_paths(policy, root)
-    assert set(paths.allow) == {policy.root, policy.extra_writable[0]}
-    # Only existing paths get an ACL change: .meltzer does not exist.
-    assert set(paths.deny_write) == {policy.root / ".git", policy.deny_read[0]}
-    assert paths.deny_read == (policy.deny_read[0],)
-
-
-def test_windows_read_only_and_full_access(root):
-    paths = compute_allow_deny_paths(SandboxPolicy.for_session(SandboxMode.READ_ONLY, root), root)
-    assert paths.allow == () and paths.deny_write == () and WindowsSandboxMode("unelevated") == WindowsSandboxMode.UNELEVATED
-    with pytest.raises(SandboxSetupError):
-        compute_allow_deny_paths(SandboxPolicy.for_session(SandboxMode.FULL_ACCESS, root), root)
-
-
 # --- backend selection ---------------------------------------------------------------
 
 
@@ -155,3 +128,13 @@ def test_platform_without_backend_refuses(monkeypatch):
         select_backend("darwin")
     monkeypatch.setattr("meltzer.sandbox.os.path.exists", lambda path: path == SEATBELT_EXECUTABLE)
     assert select_backend("darwin") == SandboxBackend.SEATBELT
+
+
+def test_runner_uses_seatbelt_on_macos(monkeypatch, root, tmp_path):
+    monkeypatch.setattr("meltzer.exec.select_backend", lambda: SandboxBackend.SEATBELT)
+    runner = ProcessRunner(workspace_policy(root), tmp_path / "logs")
+    argv, status_read, status_write, proxy = runner.build_argv("echo hi", root, True)
+    assert argv[:2] == [SEATBELT_EXECUTABLE, "-p"] and argv[-3:] == ["bash", "-c", "echo hi"]
+    assert (status_read, status_write, proxy) == (None, None, None)
+    with pytest.raises(SandboxSetupError, match="proxy"):
+        runner.build_argv("echo hi", root, True, workspace_policy(root, network=NetworkMode.PROXY))

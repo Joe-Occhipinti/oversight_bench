@@ -21,8 +21,10 @@ from typing import TYPE_CHECKING, Any
 from meltzer.network.bridge import bridge_command
 from meltzer.network.policy import NetworkApprovals, NetworkPolicy
 from meltzer.network.proxy import SOCKET_NAME, NetworkProxy
+from meltzer.sandbox import SandboxBackend, select_backend
 from meltzer.sandbox.bwrap import PROXY_SOCKET_DIR, SandboxSetupError, build_bwrap_args, exit_code_from_status
 from meltzer.sandbox.policy import NetworkMode, SandboxPolicy
+from meltzer.sandbox.seatbelt import seatbelt_command
 
 if TYPE_CHECKING:
     from meltzer.telemetry.events import SessionTelemetry
@@ -175,12 +177,17 @@ class ProcessRunner:
 
         A sandboxed command with network mode proxy starts with a network proxy
         that decides its requests with `network`, the network approvals of the
-        session that runs it; without them, no host is reachable.
+        session that runs it; without them, no host is reachable. On macOS
+        (Seatbelt) there are no status fds and network mode proxy is refused.
         """
         if not sandboxed:
             return _shell_argv(command), None, None, None
         policy = policy or self.policy
         argv_command = _shell_argv(command)
+        if select_backend() == SandboxBackend.SEATBELT:
+            if policy.network == NetworkMode.PROXY:
+                raise SandboxSetupError("network mode proxy needs the Linux sandbox; it is not available on macOS")
+            return seatbelt_command(policy, argv_command, cwd), None, None, None
         proxy = None
         if policy.network == NetworkMode.PROXY:
             proxy = self._start_proxy(command, cwd, network)
