@@ -144,13 +144,15 @@ class ProcessRunner:
         # running (started in the background) when the command returned.
         self.leftover_groups: list[int] = []
 
-    def _argv(self, command: str, cwd: Path, sandboxed: bool) -> tuple[list[str], int | None, int | None]:
-        """Return (argv, status read fd, status write fd)."""
+    def _argv(
+        self, command: str, cwd: Path, sandboxed: bool, policy: SandboxPolicy | None = None
+    ) -> tuple[list[str], int | None, int | None]:
+        """Return (argv, status read fd, status write fd). `policy` replaces the runner's policy for this command."""
         if not sandboxed:
             return _shell_argv(command), None, None
         read_fd, write_fd = os.pipe()
         try:
-            argv = build_bwrap_args(self.policy, _shell_argv(command), cwd, write_fd)
+            argv = build_bwrap_args(policy or self.policy, _shell_argv(command), cwd, write_fd)
         except SandboxSetupError:
             os.close(read_fd)
             os.close(write_fd)
@@ -185,9 +187,9 @@ class ProcessRunner:
             if status_write is not None:
                 os.close(status_write)
 
-    def run(self, command: str, cwd: Path, sandboxed: bool) -> ExecResult:
+    def run(self, command: str, cwd: Path, sandboxed: bool, policy: SandboxPolicy | None = None) -> ExecResult:
         """Run a command to completion. Raises SandboxSetupError if the sandbox could not start it."""
-        argv, status_read, status_write = self._argv(command, cwd, sandboxed)
+        argv, status_read, status_write = self._argv(command, cwd, sandboxed, policy)
         started = time.monotonic()
         process = self._spawn(argv, cwd, subprocess.PIPE, status_read, status_write)
 
@@ -216,12 +218,14 @@ class ProcessRunner:
                 exit_code = reported
         return ExecResult(exit_code=exit_code, output=output, duration=duration, timed_out=timed_out)
 
-    def start_background(self, command: str, cwd: Path, sandboxed: bool) -> BackgroundProcess:
+    def start_background(
+        self, command: str, cwd: Path, sandboxed: bool, policy: SandboxPolicy | None = None
+    ) -> BackgroundProcess:
         """Start a command and return at once. Output goes to a log file."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
         log_path = self.log_dir / f"bg-{len(self.background) + 1}-{stamp}.log"
-        argv, status_read, status_write = self._argv(command, cwd, sandboxed)
+        argv, status_read, status_write = self._argv(command, cwd, sandboxed, policy)
         with log_path.open("wb") as log:
             process = self._spawn(argv, cwd, log, status_read, status_write)
 

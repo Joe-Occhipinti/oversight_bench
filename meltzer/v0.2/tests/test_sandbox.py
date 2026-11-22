@@ -196,6 +196,19 @@ def run(policy: SandboxPolicy, command: str, tmp_path: Path):
 
 
 @needs_bwrap
+def test_policy_of_one_command(root, tmp_path):
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    policy = workspace_policy(root)
+    runner = ProcessRunner(policy, log_dir=tmp_path / "logs", timeout=30)
+    wider = policy.with_grants(write=(extra,))
+    assert runner.run(f"echo x > {extra / 'a.txt'}", root, sandboxed=True, policy=wider).exit_code == 0
+    assert (extra / "a.txt").read_text() == "x\n"
+    if not policy.can_write(extra):
+        assert runner.run(f"echo y > {extra / 'b.txt'}", root, sandboxed=True).exit_code != 0
+
+
+@needs_bwrap
 def test_writes_in_root_succeed(root, tmp_path):
     result = run(workspace_policy(root), "echo hello > out.txt && cat out.txt", tmp_path)
     assert result.exit_code == 0 and "hello" in result.output

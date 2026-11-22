@@ -21,5 +21,5 @@ USER tester
 WORKDIR /home/tester
 
 # Temporary test directories live outside /tmp, which is a writable root in the sandbox.
-ENTRYPOINT ["python", "-m", "pytest", "-p", "no:cacheprovider", "--basetemp=/home/tester/pytest-tmp", "/opt/meltzer-src/tests"]
-CMD ["-q"]
+ENTRYPOINT ["python", "-m", "pytest", "-p", "no:cacheprovider", "--basetemp=/home/tester/pytest-tmp", "--rootdir=/opt/meltzer-src"]
+CMD ["-q", "/opt/meltzer-src/tests"]
