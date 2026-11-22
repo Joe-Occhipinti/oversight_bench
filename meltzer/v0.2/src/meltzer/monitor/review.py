@@ -21,6 +21,7 @@ from meltzer.config.schema import Config
 from meltzer.history import History, SessionRecorder
 from meltzer.monitor.prompt import review_messages
 from meltzer.monitor.tools import review_tools
+from meltzer.sandbox.policy import SandboxPolicy
 from meltzer.ui import TerminalUI
 
 # Model calls per review, including the ones that only run reviewer tools.
@@ -82,6 +83,7 @@ class ReviewedSession(Protocol):
 
     config: Config
     root: Path
+    policy: SandboxPolicy
     history: History
     recorder: SessionRecorder
     client: ChatClient
@@ -110,12 +112,15 @@ class MonitorReviewer:
     def _assess(self, request: ApprovalRequest) -> tuple[Assessment, int]:
         """Run one review conversation. Returns the assessment and the number of tool calls."""
         session = self.session
-        tools = review_tools(session.root)
+        tools = review_tools(session.root, session.policy.can_read)
         messages = review_messages(
             session.root,
             list(session.history),
             request,
             session.config.monitor_transcript_items,
+            session.config.monitor_environment,
+            session.config.monitor_trusted_hosts,
+            session.policy.can_read,
         )
         tool_calls = 0
         for _ in range(MAX_REVIEW_STEPS):

@@ -116,7 +116,7 @@ def untrusted_notice(trust: ProjectTrust, user_config: Path) -> str:
     )
 
 
-def _table_path(line: str) -> tuple[str, ...] | None:
+def table_path(line: str) -> tuple[str, ...] | None:
     """The key path of a table header line such as `[projects."/src/app"]`, else None."""
     stripped = line.strip()
     if not stripped.startswith("["):
@@ -136,7 +136,7 @@ def set_trust_level(text: str, project: str, level: TrustLevel) -> str:
     """Return `text` with trust_level set in the table of `project`; other lines are kept."""
     assignment = f"{TRUST_LEVEL_KEY} = {toml_string(level.value)}\n"
     lines = text.splitlines(keepends=True)
-    header = next((n for n, line in enumerate(lines) if _table_path(line) == (PROJECTS_KEY, project)), None)
+    header = next((n for n, line in enumerate(lines) if table_path(line) == (PROJECTS_KEY, project)), None)
     if header is None:
         prefix = text
         if prefix and not prefix.endswith("\n"):
@@ -145,7 +145,7 @@ def set_trust_level(text: str, project: str, level: TrustLevel) -> str:
             prefix += "\n"
         return prefix + f"[{PROJECTS_KEY}.{toml_string(project)}]\n" + assignment
     end = next(
-        (n for n in range(header + 1, len(lines)) if _table_path(lines[n]) is not None),
+        (n for n in range(header + 1, len(lines)) if table_path(lines[n]) is not None),
         len(lines),
     )
     for n in range(header + 1, end):

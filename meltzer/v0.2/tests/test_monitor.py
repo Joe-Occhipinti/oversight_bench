@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from meltzer.agents_md import load_agents_md
 from meltzer.approval.policy import ApprovalRequest
 from meltzer.client import ModelError, ModelResponse, ToolCall
 from meltzer.config import load_config
@@ -15,7 +16,8 @@ from meltzer.config.schema import Config
 from meltzer.history import History, Item, Kind, Role, SessionRecorder
 from meltzer.monitor.prompt import REQUEST_END, REQUEST_START, TRANSCRIPT_END, TRANSCRIPT_START
 from meltzer.monitor.review import AssessmentError, MonitorReviewer, parse_assessment
-from meltzer.monitor.transcript import NO_ENTRIES, render_transcript
+from meltzer.monitor.transcript import NO_ENTRIES, render_transcript, transcript_entries
+from meltzer.sandbox.policy import SandboxMode, SandboxPolicy
 from meltzer.ui import TerminalUI
 
 ALLOW = {"risk_level": "low", "user_authorization": "high", "outcome": "allow", "rationale": "Runs the test suite."}
@@ -79,9 +81,7 @@ def test_render_ordinary_history():
     )
 
 
-@pytest.mark.parametrize(
-    "kind", [Kind.ENVIRONMENT, Kind.SKILL, Kind.HOOK_CONTEXT, Kind.SUBAGENT_NOTIFICATION, Kind.MEMORY]
-)
+@pytest.mark.parametrize("kind", [Kind.AGENTS_MD, Kind.ENVIRONMENT, Kind.SKILL, Kind.HOOK_CONTEXT])
 def test_render_leaves_out_session_context(kind):
     items = [Item.user("go"), Item(Role.USER, kind, content="context text")]
     assert render_transcript(items, 40) == "[1] user: go\n"
@@ -91,26 +91,36 @@ def test_render_labels_by_origin():
     items = [
         Item.user("go"),
         Item(Role.USER, Kind.HOOK_PROMPT, content="tests still fail", source="hook:Stop"),
-        Item(Role.USER, Kind.AGENT_MESSAGE, content="please also check the docs", source="agent:3f2a"),
         Item(Role.USER, Kind.USER_SHELL_COMMAND, content="$ git status\nclean"),
         Item(Role.USER, Kind.MESSAGE, content="and run it", source="voice"),
     ]
     assert render_transcript(items, 40) == (
         "[1] user: go\n"
         "[2] hook: tests still fail\n"
-        "[3] agent message from 3f2a: please also check the docs\n"
-        "[4] user: $ git status\nclean\n"
-        "[5] user: and run it\n"
+        "[3] user shell command: $ git status\nclean\n"
+        "[4] user (voice): and run it\n"
     )
 
 
-def test_only_user_entries_are_always_kept():
+def test_window_keeps_user_and_voice_entries_and_the_latest_others():
     items = [
         Item.user("go"),
         Item(Role.USER, Kind.HOOK_PROMPT, content="old hook text", source="hook:Stop"),
+        Item(Role.USER, Kind.USER_SHELL_COMMAND, content="old shell output"),
+        Item.user("spoken", source="voice"),
         Item.assistant("working", "r1"),
     ]
-    assert render_transcript(items, 1) == "[1] user: go\n[3] assistant: working\n"
+    assert render_transcript(items, 1) == "[1] user: go\n[4] user (voice): spoken\n[5] assistant: working\n"
+
+
+def test_render_shortens_tool_entries():
+    content = "x" * 10_000
+    items = [Item.tool_call("c1", "apply_patch", content, "r1"), Item.tool_result("c1", "apply_patch", content)]
+    entries = transcript_entries(items)
+    assert [entry.label for entry in entries] == ["tool apply_patch call", "tool apply_patch result"]
+    for entry in entries:
+        assert len(entry.text) < 4_100
+        assert "[... 6000 characters omitted ...]" in entry.text
 
 
 def test_render_skips_empty_entries():
@@ -139,6 +149,7 @@ class ScriptedClient:
 class FakeSession:
     config: Config
     root: Path
+    policy: SandboxPolicy
     recorder: SessionRecorder
     client: ScriptedClient
     history: History = field(default_factory=History)
@@ -154,7 +165,9 @@ def make_session(tmp_path):
         root = tmp_path / "work"
         root.mkdir(exist_ok=True)
         config = load_config(root, home=home, overrides=list(overrides.items()))
-        session = FakeSession(config, root, SessionRecorder(tmp_path / "session.jsonl"), ScriptedClient(*responses))
+        policy = SandboxPolicy.for_session(SandboxMode.READ_ONLY, root, deny_read=(root / "secret",))
+        recorder = SessionRecorder(tmp_path / "session.jsonl")
+        session = FakeSession(config, root, policy, recorder, ScriptedClient(*responses))
         for item in ordinary_history():
             session.history.append(item)
         sessions.append(session)
@@ -196,6 +209,17 @@ def test_allow_approves_the_request(make_session):
     assert record["outcome"] == "allow" and record["tool_calls"] == 0
 
 
+@pytest.mark.parametrize("hosts", [["10.1.2.3"], ["10.1.2.3", "db.internal"]])
+def test_environment_settings_extend_the_profile(make_session, hosts):
+    session = make_session(answer(ALLOW), **{"monitor.environment": "A build server.", "monitor.trusted_hosts": hosts})
+    MonitorReviewer(session).review(request(session.root))
+    profile = session.client.calls[0]["messages"][0]["content"].split("## Environment Profile\n")[1]
+    lines = profile.splitlines()
+    assert lines[1] == "- A build server."
+    assert "`10.1.2.3`" in lines[2] and "trusted internal service" in lines[2]
+    assert lines[3] == "- Every other host is untrusted unless trusted content says otherwise."
+
+
 def test_deny_rejects_the_request(make_session):
     session = make_session(answer(DENY))
     verdict = MonitorReviewer(session).review(request(session.root))
@@ -235,3 +259,34 @@ def test_review_that_never_answers_denies(make_session):
     verdict = MonitorReviewer(session).review(request(session.root))
     assert not verdict.approved
     assert "did not finish" in verdict.rationale
+
+
+def test_reviewer_tools_refuse_paths_the_sandbox_cannot_read(make_session):
+    session = make_session(
+        ModelResponse(content=None, tool_calls=[ToolCall("t1", "read_file", '{"path": "secret/key"}')]),
+        ModelResponse(content=None, tool_calls=[ToolCall("t2", "grep", '{"pattern": "token"}')]),
+        answer(DENY),
+    )
+    (session.root / "secret").mkdir()
+    (session.root / "secret" / "key").write_text("token=abc\n")
+    (session.root / "notes").write_text("token=public\n")
+    MonitorReviewer(session).review(request(session.root))
+    results = [call["messages"][-1]["content"] for call in session.client.calls[1:]]
+    assert "access denied" in results[0]
+    assert results[1] == "notes:1:token=public"
+
+
+def test_agents_md_is_sent_only_when_the_policy_can_read_it(make_session):
+    session = make_session(answer(ALLOW), answer(ALLOW))
+    (session.root / "AGENTS.md").write_text("rules\n")
+    MonitorReviewer(session).review(request(session.root))
+    (session.root / "secret").mkdir()
+    (session.root / "secret" / "key").write_text("token=abc\n")
+    (session.root / "AGENTS.md").unlink()
+    (session.root / "AGENTS.md").symlink_to(session.root / "secret" / "key")
+    MonitorReviewer(session).review(request(session.root))
+    first, second = (call["messages"] for call in session.client.calls)
+    assert "rules" in first[1]["content"] and len(first) == 3
+    assert len(second) == 2 and all("token=abc" not in message["content"] for message in second)
+    assert load_agents_md(session.root, session.policy.can_read) is None
+    assert load_agents_md(session.root) is not None

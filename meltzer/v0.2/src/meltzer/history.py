@@ -7,13 +7,15 @@ to the provider as one assistant message.
 Sessions are recorded as JSON lines under ~/.meltzer/sessions/YYYY/MM/DD/:
 a `session_meta` line first, then one `item` line per new history item, and
 event lines for changes to existing items (`item_updated`, `item_removed`,
-`compacted`) and for approval reviews (`review`).
+`compacted`, `rolled_back`), for approval reviews (`review`) and for a resumed
+session (`resumed`). `load_session` replays a file into its conversation items.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+import uuid
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -39,10 +41,19 @@ class Kind(StrEnum):
     SKILL = "skill"
     HOOK_CONTEXT = "hook_context"
     HOOK_PROMPT = "hook_prompt"
-    SUBAGENT_NOTIFICATION = "subagent_notification"
-    AGENT_MESSAGE = "agent_message"
-    MEMORY = "memory"
     USER_SHELL_COMMAND = "user_shell_command"
+
+
+# Kinds a resumed or forked session does not load from the session file: it adds
+# AGENTS.md, environment, skill and hook context items from the current files and
+# settings, and starts with an empty plan.
+REBUILT_KINDS = frozenset(
+    {Kind.AGENTS_MD, Kind.ENVIRONMENT, Kind.SKILL, Kind.HOOK_CONTEXT, Kind.PLAN}
+)
+
+
+class SessionFileError(Exception):
+    """A recorded session cannot be found or read."""
 
 
 def _now() -> str:
@@ -59,13 +70,13 @@ class Item:
     arguments: str | None = None  # raw JSON arguments of a tool call
     reasoning: dict[str, Any] | None = None  # provider reasoning fields, kept verbatim
     response_id: str | None = None
-    # Where a context item came from, e.g. "voice", "hook:Stop", "agent:<id>".
+    # Where a context item came from, e.g. "voice", "hook:Stop".
     source: str | None = None
     created_at: str = field(default_factory=_now)
 
     @classmethod
-    def user(cls, text: str) -> Item:
-        return cls(Role.USER, Kind.MESSAGE, content=text)
+    def user(cls, text: str, source: str | None = None) -> Item:
+        return cls(Role.USER, Kind.MESSAGE, content=text, source=source)
 
     @classmethod
     def assistant(cls, text: str, response_id: str) -> Item:
@@ -89,6 +100,14 @@ class Item:
     @classmethod
     def tool_result(cls, call_id: str, name: str, output: str) -> Item:
         return cls(Role.TOOL, Kind.TOOL_RESULT, content=output, name=name, call_id=call_id)
+
+    @classmethod
+    def from_record(cls, record: dict[str, Any]) -> Item:
+        """The item of a record written by `to_record`; other keys are ignored."""
+        values = {f.name: record[f.name] for f in fields(cls) if f.name in record}
+        values["role"] = Role(record["role"])
+        values["kind"] = Kind(record["kind"])
+        return cls(**values)
 
     def to_record(self) -> dict[str, Any]:
         record = asdict(self)
@@ -130,6 +149,22 @@ class History:
     def replace(self, items: list[Item]) -> None:
         self.items = list(items)
 
+    def drop_last_user_turns(self, num_turns: int) -> int:
+        """Remove the last `num_turns` user turns: the Nth-from-last user message and every item after it.
+
+        Returns the number of items removed.
+        """
+        if num_turns < 1:
+            raise ValueError("the number of turns must be at least 1")
+        starts = [index for index, item in enumerate(self.items) if _is_user_message(item)]
+        if num_turns > len(starts):
+            turns = "turn" if len(starts) == 1 else "turns"
+            raise ValueError(f"the history has {len(starts)} user {turns}")
+        cut = starts[-num_turns]
+        dropped = len(self.items) - cut
+        del self.items[cut:]
+        return dropped
+
     def to_messages(self) -> list[dict[str, Any]]:
         """Chat-completions messages for the history (without the system message)."""
         messages: list[dict[str, Any]] = []
@@ -170,6 +205,10 @@ class History:
         return messages
 
 
+def _is_user_message(item: Item) -> bool:
+    return item.role == Role.USER and item.kind == Kind.MESSAGE
+
+
 def session_file(sessions_dir: Path, session_id: str, started: datetime) -> Path:
     day_dir = sessions_dir / started.strftime("%Y") / started.strftime("%m") / started.strftime("%d")
     return day_dir / f"session-{started.strftime('%Y-%m-%dT%H-%M-%S')}-{session_id}.jsonl"
@@ -200,4 +239,113 @@ class SessionRecorder:
     def close(self) -> None:
         if not self._file.closed:
             self._file.close()
+
+
+def read_session_meta(path: Path) -> dict[str, Any] | None:
+    """The `session_meta` record on the first line of a session file, or None."""
+    try:
+        with path.open(encoding="utf-8") as file:
+            record = json.loads(file.readline())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("type") != "session_meta":
+        return None
+    return record
+
+
+def load_session(path: Path) -> tuple[dict[str, Any], list[Item]]:
+    """The metadata and conversation items of a session file.
+
+    Replays the `item` lines and the `item_updated`, `item_removed`, `compacted`
+    (its replacement history), `rolled_back` and `resumed` events in order;
+    other lines are skipped. Items of the kinds in REBUILT_KINDS are left out.
+    A last line without a newline (a write that did not finish) is ignored.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise SessionFileError(f"cannot read {path}: {exc}") from exc
+    # The text after the last newline is empty, or a line that was not finished.
+    lines = text.split("\n")[:-1]
+    meta: dict[str, Any] | None = None
+    history = History()
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                raise ValueError("not a JSON object")
+            if meta is None:
+                if record.get("type") != "session_meta":
+                    raise ValueError("the file does not start with a session_meta line")
+                meta = record
+                continue
+            _replay(history, record)
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise SessionFileError(f"{path}, line {number}: {exc}") from None
+    if meta is None:
+        raise SessionFileError(f"{path} has no session_meta line")
+    return meta, [item for item in history if item.kind not in REBUILT_KINDS]
+
+
+def _replay(history: History, record: dict[str, Any]) -> None:
+    kind = record.get("type")
+    if kind == "item":
+        history.append(Item.from_record(record))
+    elif kind == "item_updated":
+        history.items[_index(history, record)] = Item.from_record(record["item"])
+    elif kind == "item_removed":
+        del history.items[_index(history, record)]
+    elif kind == "compacted":
+        history.replace([Item.from_record(item) for item in record["replacement_history"]])
+    elif kind == "rolled_back":
+        history.drop_last_user_turns(record["num_turns"])
+    elif kind == "resumed":
+        # The resumed session dropped these items and added new ones after this line.
+        history.replace([item for item in history if item.kind not in REBUILT_KINDS])
+
+
+def _index(history: History, record: dict[str, Any]) -> int:
+    index = record["index"]
+    if not isinstance(index, int) or not 0 <= index < len(history):
+        raise IndexError(f"no item at index {index!r}")
+    return index
+
+
+def find_session(sessions_dir: Path, session_id: str | None = None, cwd: Path | None = None) -> Path:
+    """The file of session `session_id` under `sessions_dir`; for None, the newest top-level session.
+
+    With `cwd`, the newest session is the newest one recorded in that directory.
+
+    Only files where `session_file` puts them are considered
+    (YYYY/MM/DD/session-<time>-<id>.jsonl). The newest session is the one
+    written to most recently; sessions of subagents are skipped.
+    """
+    if session_id is not None:
+        try:
+            session_id = str(uuid.UUID(session_id))
+        except ValueError:
+            raise SessionFileError(f"not a session id: {session_id!r}") from None
+        matches = sorted(_session_files(sessions_dir, session_id))
+        if not matches:
+            raise SessionFileError(f"no recorded session with id {session_id}")
+        return matches[0]
+    for path in sorted(_session_files(sessions_dir, "*"), key=_modified, reverse=True):
+        meta = read_session_meta(path)
+        if meta is not None and "parent_session_id" not in meta and (cwd is None or meta.get("cwd") == str(cwd)):
+            return path
+    raise SessionFileError(f"no recorded sessions in {cwd or sessions_dir}")
+
+
+def _session_files(sessions_dir: Path, session_id: str) -> list[Path]:
+    pattern = f"[0-9][0-9][0-9][0-9]/[0-9][0-9]/[0-9][0-9]/session-*-{session_id}.jsonl"
+    return [path for path in sessions_dir.glob(pattern) if path.is_file() and not path.is_symlink()]
+
+
+def _modified(path: Path) -> tuple[float, str]:
+    try:
+        return path.stat().st_mtime, path.name
+    except OSError:
+        return 0.0, path.name
 

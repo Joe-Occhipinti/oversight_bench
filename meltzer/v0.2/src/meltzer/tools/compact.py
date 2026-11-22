@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from meltzer.history import History, Item, Kind, Role, SessionRecorder
-from meltzer.tools.registry import ToolSpec, require_string
+from meltzer.tools.registry import Tool, ToolSpec, require_string
+
+if TYPE_CHECKING:
+    from meltzer.hooks import HookRunner
 
 SUMMARY_PREFIX = (
     "The conversation so far was compacted. The summary below was written before compaction; "
@@ -50,7 +53,7 @@ def compact_history(history: History, recorder: SessionRecorder, summary: str) -
     return summary_item
 
 
-class CompactTool:
+class CompactTool(Tool):
     spec = COMPACT_SPEC
 
     def __init__(
@@ -58,12 +61,34 @@ class CompactTool:
         history: History,
         recorder: SessionRecorder,
         after_tool_calls: Callable[[Callable[[], None]], None],
+        *,
+        hooks: HookRunner | None = None,
+        stop_turn: Callable[[str], None] | None = None,
     ):
         self.history = history
         self.recorder = recorder
         self.after_tool_calls = after_tool_calls
+        # PreCompact and PostCompact hooks, and how they end the turn.
+        self.hooks = hooks
+        self.stop_turn = stop_turn
 
     def run(self, arguments: dict[str, Any]) -> str:
         summary = require_string(arguments, "summary").strip()
-        self.after_tool_calls(lambda: compact_history(self.history, self.recorder, summary))
+        self.after_tool_calls(lambda: self._compact(summary))
         return "The history will be replaced by the summary."
+
+    def _compact(self, summary: str) -> None:
+        if self.hooks is not None:
+            check = self.hooks.pre_compact("manual")
+            if check.stop:
+                self._stop(f"compaction stopped by a PreCompact hook: {check.reason}")
+                return
+        compact_history(self.history, self.recorder, summary)
+        if self.hooks is not None:
+            check = self.hooks.post_compact("manual")
+            if check.stop:
+                self._stop(f"stopped by a PostCompact hook: {check.reason}")
+
+    def _stop(self, reason: str) -> None:
+        if self.stop_turn is not None:
+            self.stop_turn(reason)

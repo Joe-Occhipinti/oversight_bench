@@ -40,23 +40,28 @@ def headless_conflict(settings: ApprovalSettings) -> str | None:
 
 MAX_PATCH_CHARS = 16_000
 MAX_COMMAND_CHARS = 2_000
+MAX_TOOL_DESCRIPTION_CHARS = 1_000
 
 # Tools whose requests carry a shell command.
 COMMAND_TOOLS = ("shell", "exec_command")
 
 
-def patch_preview(text: str) -> str:
-    if len(text) <= MAX_PATCH_CHARS:
+def _preview(text: str, limit: int, what: str) -> str:
+    if len(text) <= limit:
         return text
-    omitted = len(text) - MAX_PATCH_CHARS
-    return f"{text[:MAX_PATCH_CHARS]}\n[... {omitted} more characters of the patch not shown]"
+    return f"{text[:limit]}\n[... {len(text) - limit} more characters of the {what} not shown]"
+
+
+def patch_preview(text: str) -> str:
+    return _preview(text, MAX_PATCH_CHARS, "patch")
 
 
 def command_preview(text: str) -> str:
-    if len(text) <= MAX_COMMAND_CHARS:
-        return text
-    omitted = len(text) - MAX_COMMAND_CHARS
-    return f"{text[:MAX_COMMAND_CHARS]}\n[... {omitted} more characters of the command not shown]"
+    return _preview(text, MAX_COMMAND_CHARS, "command")
+
+
+def tool_description_preview(text: str) -> str:
+    return _preview(text, MAX_TOOL_DESCRIPTION_CHARS, "description")
 
 
 @dataclass(frozen=True)
@@ -108,7 +113,7 @@ class ApprovalRequest:
             action["tool_name"] = self.mcp_tool
             action["arguments"] = self.arguments or {}
             if self.tool_description:
-                action["tool_description"] = self.tool_description
+                action["tool_description"] = tool_description_preview(self.tool_description)
             if self.annotations:
                 action["annotations"] = self.annotations
         if self.permissions is not None:
@@ -135,6 +140,8 @@ class ApprovalRequest:
 
 class ApprovalChoice(StrEnum):
     APPROVE_ONCE = "approve-once"
+    # Approve for the rest of the session (offered for permission requests).
+    APPROVE_FOR_SESSION = "approve-for-session"
     # Approve, and allow commands starting with the suggested prefix from now on.
     ALWAYS_ALLOW_PREFIX = "always-allow-prefix"
     DENY = "deny"
@@ -146,6 +153,8 @@ class ReviewVerdict:
     rationale: str = ""
     # Set when the reviewer allowed this prefix for future commands.
     remember_prefix: tuple[str, ...] = ()
+    # The approval holds for the rest of the session.
+    for_session: bool = False
 
 
 class Reviewer(Protocol):

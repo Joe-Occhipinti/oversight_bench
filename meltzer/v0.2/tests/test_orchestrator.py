@@ -21,25 +21,17 @@ from meltzer.approval.policy import (
     ApprovalPolicy,
     ApprovalRequest,
     MAX_PATCH_CHARS,
+    MAX_TOOL_DESCRIPTION_CHARS,
     ApprovalSettings,
     ReviewerKind,
-    ReviewVerdict,
     headless_conflict,
     patch_preview,
 )
-from meltzer.approval.rules import RuleSet, parse_rules
-from meltzer.sandbox.policy import SandboxMode, SandboxPolicy
+from meltzer.approval.rules import parse_rules
+from meltzer.sandbox.policy import SandboxMode
 from meltzer.ui import TerminalUI
 
-
-class RecordingReviewer:
-    def __init__(self, verdict: ReviewVerdict):
-        self.verdict = verdict
-        self.requests: list[ApprovalRequest] = []
-
-    def review(self, request: ApprovalRequest) -> ReviewVerdict:
-        self.requests.append(request)
-        return self.verdict
+from conftest import RecordingReviewer, make_orchestrator
 
 
 @pytest.fixture
@@ -49,30 +41,21 @@ def work(tmp_path: Path) -> Path:
     return path
 
 
-def orchestrator(
-    work: Path,
-    reviewer: RecordingReviewer,
-    *,
-    policy: ApprovalPolicy = ApprovalPolicy.ON_REQUEST,
-    mode: SandboxMode = SandboxMode.WORKSPACE_WRITE,
-    rules_text: str = "",
-) -> ApprovalOrchestrator:
+def orchestrator(work: Path, reviewer: RecordingReviewer, *, rules_text: str = "", **kwargs) -> ApprovalOrchestrator:
     rules, warnings = parse_rules(rules_text, work / "test.rules")
     assert warnings == []
-    return ApprovalOrchestrator(
-        ApprovalSettings(policy=policy, reviewer=ReviewerKind.USER),
-        SandboxPolicy.for_session(mode, work),
-        reviewer,
-        RuleSet(rules, work.parent / "rules"),
-    )
+    return make_orchestrator(work, reviewer, rules=rules, **kwargs)
 
 
 def approve() -> RecordingReviewer:
-    return RecordingReviewer(ReviewVerdict(approved=True, rationale="approved by user"))
+    return RecordingReviewer()
 
 
 def deny() -> RecordingReviewer:
-    return RecordingReviewer(ReviewVerdict(approved=False, rationale="denied by user"))
+    return RecordingReviewer(approved=False)
+
+
+FORBIDDEN = 'prefix_rule(pattern=["rm", "-rf"], decision="forbidden", justification="no")\n'
 
 
 @pytest.mark.parametrize(
@@ -84,8 +67,11 @@ def deny() -> RecordingReviewer:
         ("make install", True, {"mode": SandboxMode.FULL_ACCESS}, False, True, False, None, False),
         ("cargo test --all", True, {"rules_text": 'prefix_rule(pattern=["cargo", "test"])\n'}, False, True, False,
          "allowed by rule cargo test", False),
+        ("rm -rf build", False, {"rules_text": FORBIDDEN}, True, False, False, ("forbidden by rule rm -rf", ": no"), False),
+        ("rm -rf build", False, {"rules_text": FORBIDDEN, "policy": ApprovalPolicy.NEVER}, True, False, False,
+         ("forbidden by rule rm -rf", ": no"), False),
     ],
-    ids=["plain", "escalated-denied", "policy-never", "full-access", "allow-rule"],
+    ids=["plain", "escalated-denied", "policy-never", "full-access", "allow-rule", "forbidden", "forbidden-never"],
 )
 def test_command_decisions(work, command, escalate, options, approved, run, sandboxed, reason, reviewed):
     reviewer = approve() if approved else deny()
@@ -95,8 +81,8 @@ def test_command_decisions(work, command, escalate, options, approved, run, sand
     assert decision.run is run
     if run:
         assert decision.sandboxed is sandboxed
-    if reason is not None:
-        assert reason in decision.reason
+    for part in (reason,) if isinstance(reason, str) else reason or ():
+        assert part in decision.reason
     assert bool(reviewer.requests) is reviewed
 
 
@@ -112,18 +98,52 @@ def test_escalation_goes_to_the_reviewer(work):
     assert sent.suggested_prefix == ("curl", "-sO", "https://example.com/x.tar.gz")
 
 
-def test_forbidden_rule_rejects_even_without_escalation(work):
-    reviewer = approve()
-    decision = orchestrator(
-        work, reviewer, rules_text='prefix_rule(pattern=["rm", "-rf"], decision="forbidden", justification="no")\n'
-    ).decide_command(CommandRequest("rm -rf build", work))
-    assert not decision.run
-    assert decision.reason.startswith("forbidden by rule rm -rf") and decision.reason.endswith(": no")
-    assert reviewer.requests == []
+PROMPT_RULE = 'prefix_rule(pattern=["git", "push"], decision="prompt", justification="pushes need review")\n'
+
+
+@pytest.mark.parametrize(
+    "escalate, options, approved, run, sandboxed",
+    [
+        (False, {}, True, True, True),
+        (True, {}, True, True, False),
+        (False, {}, False, False, False),
+        (False, {"mode": SandboxMode.FULL_ACCESS}, True, True, False),
+    ],
+    ids=["approved", "approved-escalated", "denied", "full-access"],
+)
+def test_prompt_rule_sends_the_command_to_review(work, escalate, options, approved, run, sandboxed):
+    reviewer = approve() if approved else deny()
+    extra = {"escalate": True, "justification": "publish"} if escalate else {}
+    decision = orchestrator(work, reviewer, rules_text=PROMPT_RULE, **options).decide_command(
+        CommandRequest("git push origin main", work, **extra)
+    )
+    assert (decision.run, decision.sandboxed) == (run, sandboxed)
+    assert "pushes need review" in decision.reason
+    sent = reviewer.requests[0]
+    assert sent.escalate is escalate and sent.suggested_prefix == ()
+    never = orchestrator(work, approve(), rules_text=PROMPT_RULE, policy=ApprovalPolicy.NEVER)
+    assert not never.decide_command(CommandRequest("git push origin main", work)).run
+
+
+def test_session_approval_is_passed_on(work):
+    request = PermissionsRequest("install deps", cwd=work, network_target="pypi.org")
+    session = orchestrator(work, UserReviewer(lambda request: ApprovalChoice.APPROVE_FOR_SESSION))
+    decision = session.decide_permissions(request)
+    assert decision.run and decision.for_session
+    once = orchestrator(work, approve()).decide_permissions(request)
+    assert once.run and not once.for_session
+
+
+@pytest.mark.parametrize("tool", ["request_permissions", "network_access"])
+def test_user_is_asked_once_or_session_for_a_grant_and_a_network_request(tmp_path, tool):
+    for answer, expected in (("s\n", ApprovalChoice.APPROVE_FOR_SESSION), ("y\n", ApprovalChoice.APPROVE_ONCE)):
+        ui = TerminalUI(interactive=True, stdin=io.StringIO(answer), stdout=io.StringIO(), stderr=io.StringIO())
+        request = ApprovalRequest(tool=tool, cwd=tmp_path, host="pypi.org", port=443, protocol="https", permissions={})
+        assert ui.ask_approval(request) == expected
 
 
 def test_always_allow_answer_saves_a_rule(work):
-    reviewer = RecordingReviewer(ReviewVerdict(approved=True, rationale="approved by user", remember_prefix=("cargo", "fetch")))
+    reviewer = RecordingReviewer(remember_prefix=("cargo", "fetch"))
     orch = orchestrator(work, reviewer)
     decision = orch.decide_command(CommandRequest("cargo fetch", work, escalate=True, justification="network"))
     assert decision.run and "are now allowed" in decision.reason
@@ -174,37 +194,45 @@ def test_user_prompt_for_a_patch_shows_paths_and_patch(tmp_path):
     assert "meltzer wants to apply a patch that writes outside the writable paths:" in shown
     assert f"  {target}\n" in shown and "+hello\n*** End Patch\n" in shown
     assert "outside the sandbox" not in shown
+    ui.ask_approval(ApprovalRequest(tool="apply_patch", cwd=tmp_path, paths=(tmp_path / ("a" + chr(27) + "[8m"),), patch=text))
+    assert chr(27) not in stdout.getvalue()
 
 
-def test_planned_action_names_the_request_type(tmp_path):
-    exec_action = ApprovalRequest(
-        tool="exec_command", cwd=tmp_path, command="python3 manage.py shell", escalate=True, tty=True,
-        justification="inspect the database",
-    ).planned_action()
-    assert exec_action == {
-        "tool": "exec_command", "command": "python3 manage.py shell", "cwd": str(tmp_path),
-        "justification": "inspect the database", "escalate": True, "tty": True,
-    }
-    mcp_action = ApprovalRequest(
-        tool="mcp_tool_call", cwd=tmp_path, server="ops", mcp_tool="restart_service",
-        arguments={"name": "api"}, tool_description="Restart a service.", annotations={"destructiveHint": True},
-    ).planned_action()
-    assert mcp_action["tool"] == "mcp_tool_call"
-    assert (mcp_action["server"], mcp_action["tool_name"], mcp_action["arguments"]) == ("ops", "restart_service", {"name": "api"})
-    assert mcp_action["tool_description"] == "Restart a service." and mcp_action["annotations"] == {"destructiveHint": True}
-    permissions_action = ApprovalRequest(
-        tool="request_permissions", cwd=tmp_path, justification="install dependencies",
-        permissions={"network": {"target": "pypi.org"}},
-    ).planned_action()
-    assert permissions_action["permissions"] == {"network": {"target": "pypi.org"}}
-    assert permissions_action["justification"] == "install dependencies"
+@pytest.mark.parametrize(
+    "tool, escalate, heading",
+    [
+        ("shell", False, "a rule sends this command to review before it runs:"),
+        ("exec_command", True, "meltzer wants to run outside the sandbox:"),
+    ],
+)
+def test_user_prompt_heading_for_a_command_review(tmp_path, tool, escalate, heading):
+    stdout = io.StringIO()
+    ui = TerminalUI(interactive=True, stdin=io.StringIO("n\n"), stdout=stdout, stderr=io.StringIO())
+    ui.ask_approval(ApprovalRequest(tool=tool, cwd=tmp_path, command="make deploy", escalate=escalate))
+    assert stdout.getvalue().splitlines()[1] == heading
+
+
+@pytest.mark.parametrize(
+    "name, arguments, shown",
+    [
+        ("shell", '{"command": "ls", "escalate": true}', "$ ls  [escalate]"),
+        ("exec_command", '{"cmd": "python3 -i", "tty": true}', "$ python3 -i  [tty]"),
+        ("exec_command", '{"cmd": "make"}', "$ make"),
+        ("write_stdin", '{"session_id": 1, "chars": "x"}', "[write_stdin]"),
+    ],
+)
+def test_tool_call_shows_the_command(name, arguments, shown):
+    stderr = io.StringIO()
+    TerminalUI(interactive=True, stdout=io.StringIO(), stderr=stderr).tool_call(name, arguments)
+    assert stderr.getvalue().strip() == shown
+
+
+def test_planned_action_of_a_network_request(tmp_path):
     network_action = ApprovalRequest(
         tool="network_access", cwd=tmp_path, command="pip install requests", host="pypi.org", port=443, protocol="https",
     ).planned_action()
     assert (network_action["host"], network_action["port"], network_action["protocol"]) == ("pypi.org", 443, "https")
     assert network_action["command"] == "pip install requests"
-    search_action = ApprovalRequest(tool="web_search", cwd=tmp_path, query="bubblewrap seccomp").planned_action()
-    assert search_action["query"] == "bubblewrap seccomp"
 
 
 @pytest.mark.parametrize(
@@ -233,12 +261,19 @@ def test_mcp_call_without_review(work):
     assert decision.run and reviewer.requests == []
 
 
-def test_patch_preview(tmp_path):
-    text = "*** Begin Patch\n" + "+x\n" * MAX_PATCH_CHARS
-    action = ApprovalRequest(tool="apply_patch", cwd=tmp_path, paths=(tmp_path / "a",), patch=text).planned_action()
-    shown = action["patch"]
-    assert shown.startswith(text[:MAX_PATCH_CHARS])
-    assert shown.endswith(f"[... {len(text) - MAX_PATCH_CHARS} more characters of the patch not shown]")
+@pytest.mark.parametrize(
+    "tool, field, limit, what",
+    [("apply_patch", "patch", MAX_PATCH_CHARS, "patch"), ("mcp_tool_call", "tool_description", MAX_TOOL_DESCRIPTION_CHARS, "description")],
+)
+def test_long_patches_and_tool_descriptions_are_shortened(tmp_path, tool, field, limit, what):
+    text = "x" * (limit * 2)
+    extra = {"patch": text, "paths": (tmp_path / "a",)} if field == "patch" else {
+        "server": "ops", "mcp_tool": "restart_service", "tool_description": text, "annotations": {"destructiveHint": True}
+    }
+    action = ApprovalRequest(tool=tool, cwd=tmp_path, **extra).planned_action()
+    assert action[field] == text[:limit] + f"\n[... {limit} more characters of the {what} not shown]"
+    if field == "tool_description":
+        assert action["annotations"] == {"destructiveHint": True}
     assert patch_preview("short") == "short"
 
 

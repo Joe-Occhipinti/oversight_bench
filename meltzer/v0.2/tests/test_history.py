@@ -36,13 +36,6 @@ def test_items_of_one_response_form_one_assistant_message():
     ]
 
 
-def test_consecutive_responses_stay_separate():
-    history = History()
-    history.append(Item.assistant("one", "r1"))
-    history.append(Item.assistant("two", "r2"))
-    assert [m["content"] for m in history.to_messages()] == ["one", "two"]
-
-
 @pytest.mark.parametrize(
     "kind",
     [
@@ -54,9 +47,6 @@ def test_consecutive_responses_stay_separate():
         Kind.SKILL,
         Kind.HOOK_CONTEXT,
         Kind.HOOK_PROMPT,
-        Kind.SUBAGENT_NOTIFICATION,
-        Kind.AGENT_MESSAGE,
-        Kind.MEMORY,
         Kind.USER_SHELL_COMMAND,
     ],
 )

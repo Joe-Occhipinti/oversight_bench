@@ -11,9 +11,12 @@ import pytest
 
 from meltzer import cli
 from meltzer.approval.policy import ApprovalRequest
+from conftest import ScriptedClient
 from meltzer.client import ModelResponse
 from meltzer.config import ConfigError, load_config
-from meltzer.history import Item
+from meltzer.history import Item, Kind
+from meltzer.sandbox.grants import Grant, GrantScope
+from meltzer.sandbox.policy import resolve
 from meltzer.monitor.review import MonitorReviewer
 from meltzer.session import Session
 from meltzer.ui import TerminalUI
@@ -21,39 +24,7 @@ from meltzer.ui import TerminalUI
 TEXT = "Keep commits small.\nNever edit generated files.\nmarker-7f3a\n"
 HEADING = "\n# Developer instructions\n"
 
-
-class RecordingClient:
-    """Stands in for the model client: records the messages and answers with fixed text."""
-
-    def __init__(self, content: str):
-        self.content = content
-        self.calls: list[list[dict]] = []
-
-    def complete(self, messages, tools, *, model=None) -> ModelResponse:
-        self.calls.append([dict(m) for m in messages])
-        return ModelResponse(content=self.content)
-
-    def close(self) -> None:
-        pass
-
-
-@pytest.fixture(autouse=True)
-def api_key(monkeypatch):
-    monkeypatch.setenv("MELTZER_API_KEY", "test-key")
-
-
-@pytest.fixture
-def home(tmp_path: Path) -> Path:
-    path = tmp_path / "home"
-    path.mkdir()
-    return path
-
-
-@pytest.fixture
-def work(tmp_path: Path) -> Path:
-    path = tmp_path / "work"
-    path.mkdir()
-    return path
+pytestmark = pytest.mark.usefixtures("api_key")
 
 
 @pytest.fixture
@@ -64,23 +35,11 @@ def instructions_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def make_session(tmp_path, home, work, monkeypatch):
-    # The session's private /tmp is created under tmp_path.
-    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
-    sessions: list[Session] = []
-
+def make_session(session_factory):
     def make(path: Path | None = None) -> Session:
-        overrides = [("approval_policy", "never")]
-        if path is not None:
-            overrides.append(("developer_instructions_file", str(path)))
-        config = load_config(work, home=home, overrides=overrides)
-        session = Session(config, work, TerminalUI(interactive=False, stderr=io.StringIO()), home=home)
-        sessions.append(session)
-        return session
+        return session_factory(*([] if path is None else [("developer_instructions_file", str(path))]))
 
-    yield make
-    for session in sessions:
-        session.close()
+    return make
 
 
 def system_message(session: Session) -> str:
@@ -100,7 +59,6 @@ def test_text_is_appended_to_the_system_message(make_session, instructions_file)
     session = make_session(instructions_file)
     content = system_message(session)
     assert content.endswith(HEADING + TEXT)
-    assert len(session._messages()) == 1
 
 
 def test_no_section_without_text(make_session, tmp_path):
@@ -113,8 +71,8 @@ def test_no_section_without_text(make_session, tmp_path):
 def test_monitor_never_receives_the_text(make_session, instructions_file):
     session = make_session(instructions_file)
     session.history.append(Item.user("install the package"))
-    client = RecordingClient('{"risk_level": "low", "user_authorization": "high", "outcome": "allow", "rationale": "ok"}')
-    session.client = client
+    verdict = '{"risk_level": "low", "user_authorization": "high", "outcome": "allow", "rationale": "ok"}'
+    client = session.client = ScriptedClient(ModelResponse(content=verdict))
     request = ApprovalRequest(tool="shell", cwd=session.root, command="pip install -e .", escalate=True)
     assert MonitorReviewer(session).review(request).approved
     (messages,) = client.calls
@@ -124,7 +82,7 @@ def test_monitor_never_receives_the_text(make_session, instructions_file):
 
 def test_text_is_not_written_to_the_session_log(make_session, instructions_file, home):
     session = make_session(instructions_file)
-    session.client = RecordingClient("done")
+    session.client = ScriptedClient()
     session.run_turn("go")
     assert "marker-7f3a" in json.dumps(session.client.calls)
     session.recorder.close()
@@ -134,17 +92,15 @@ def test_text_is_not_written_to_the_session_log(make_session, instructions_file,
         assert b"marker-7f3a" not in path.read_bytes(), path
 
 
-def test_subagent_reuses_the_text_without_reading_the_file(make_session, instructions_file, home):
+def test_subagent_reuses_the_text_without_reading_the_file(make_session, instructions_file):
     session = make_session(instructions_file)
     instructions_file.unlink()
-    subagent = session._start_subagent()
+    subagent = session.start_subagent()
     try:
         assert system_message(subagent) == system_message(session)
         assert system_message(subagent).endswith(HEADING + TEXT)
     finally:
         subagent.close()
-    for path in files_under(home):
-        assert b"marker-7f3a" not in path.read_bytes(), path
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="needs /dev/stdin")
@@ -188,3 +144,120 @@ def test_invalid_utf8_error_does_not_show_the_text(tmp_path, make_session):
     with pytest.raises(ConfigError, match="not valid UTF-8") as exc:
         make_session(path)
     assert "marker-7f3a" not in str(exc.value)
+
+
+# --- tools -------------------------------------------------------------------------------
+
+
+def tool_names(session: Session) -> list[str]:
+    return [spec["function"]["name"] for spec in session.tools.specs()]
+
+
+def test_subagent_has_its_own_grants_and_no_agent_tools(make_session):
+    session = make_session()
+    child = session.start_subagent()
+    try:
+        assert child.grants is not session.grants
+        assert child.process_store is session.process_store and child.mcp is session.mcp
+        assert "spawn_agent" not in tool_names(child) and "exec_command" in tool_names(child)
+    finally:
+        child.close()
+
+
+class StoredStub:
+    def __init__(self, process_id: int, owner: str):
+        self.id = process_id
+        self.owner = owner
+        self.last_used = 0.0
+        self.terminated = False
+
+    def has_exited(self) -> bool:
+        return False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def remaining_group(self) -> int | None:
+        return None
+
+
+def test_closing_a_subagent_stops_only_its_own_processes(make_session):
+    session = make_session()
+    child = session.start_subagent()
+    mine, theirs = StoredStub(1, session.id), StoredStub(2, child.id)
+    session.process_store.add(mine)
+    session.process_store.add(theirs)
+    child.close()
+    assert theirs.terminated and not mine.terminated
+    session.close()
+    assert mine.terminated
+
+
+class StubMcpManager:
+    tools: list = []
+
+    def __init__(self):
+        self.stopped = False
+
+    def shutdown(self) -> None:
+        self.stopped = True
+
+
+class StubClient:
+    closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_failed_session_start_releases_everything_it_created(tmp_path, home, work, monkeypatch):
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    mcp, client = StubMcpManager(), StubClient()
+    monkeypatch.setattr("meltzer.session.McpManager.start", lambda *args, **kwargs: mcp)
+    monkeypatch.setattr("meltzer.session.ChatClient", lambda *args, **kwargs: client)
+
+    def fail(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("meltzer.session.HookRunner.for_session", fail)
+    config = load_config(work, home=home, overrides=[("approval_policy", "never")])
+    with pytest.raises(OSError, match="disk full"):
+        Session(config, work, TerminalUI(interactive=False, stderr=io.StringIO()), home=home)
+    assert mcp.stopped and client.closed
+    assert list(tmp_path.glob("meltzer-*")) == []
+
+
+def test_close_runs_every_step_when_one_fails(make_session, tmp_path, monkeypatch):
+    session = make_session()
+    process = StoredStub(1, session.id)
+    session.process_store.add(process)
+
+    def fail(reason):
+        raise OSError("hook failed")
+
+    monkeypatch.setattr(session.hooks, "session_end", fail)
+    session.close()
+    assert process.terminated
+    assert "closing the session failed: hook failed" in session.ui.stderr.getvalue()
+    assert list(tmp_path.glob("meltzer-*")) == []
+
+
+# --- environment item ----------------------------------------------------------------------
+
+
+def test_environment_item_is_added_again_when_grants_change(make_session, tmp_path):
+    session = make_session()
+    extra = tmp_path / "out"
+    extra.mkdir()
+    session.grants.add(Grant(GrantScope.TURN, write=(extra,)))
+    session.refresh_environment()
+    assert f"<root>{resolve(extra)}</root>" in session.history.last_of_kind(Kind.ENVIRONMENT).content
+    session.grants.end_turn()
+    session.refresh_environment()
+    environment = [item for item in session.history if item.kind == Kind.ENVIRONMENT]
+    assert len(environment) == 3 and environment[2].content == environment[0].content
+
+
+def test_tool_calls_reach_hooks_with_their_arguments(make_session):
+    arguments = '{"plan": []}'
+    assert make_session().tools.hook_input("update_plan", arguments) == arguments

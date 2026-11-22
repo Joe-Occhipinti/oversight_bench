@@ -1,4 +1,9 @@
-"""Runs shell commands, in the sandbox or directly, in the foreground or background."""
+"""Runs shell commands, in the sandbox or directly, in the foreground or background.
+
+A sandboxed command whose policy has network mode proxy gets a network proxy
+of its own (meltzer.network), which checks every request of the command
+with the network approvals of the session that started it.
+"""
 
 from __future__ import annotations
 
@@ -6,14 +11,21 @@ import os
 import selectors
 import signal
 import subprocess
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from meltzer.sandbox.bwrap import SandboxSetupError, build_bwrap_args, exit_code_from_status
-from meltzer.sandbox.policy import SandboxPolicy
+from meltzer.network.bridge import bridge_command
+from meltzer.network.policy import NetworkApprovals, NetworkPolicy
+from meltzer.network.proxy import SOCKET_NAME, NetworkProxy
+from meltzer.sandbox.bwrap import PROXY_SOCKET_DIR, SandboxSetupError, build_bwrap_args, exit_code_from_status
+from meltzer.sandbox.policy import NetworkMode, SandboxPolicy
+
+if TYPE_CHECKING:
+    from meltzer.telemetry.events import SessionTelemetry
 
 DEFAULT_TIMEOUT_SECONDS = 300.0
 # A background process that exits this quickly is checked for sandbox setup errors.
@@ -48,7 +60,7 @@ def _shell_argv(command: str) -> list[str]:
     return ["bash", "-c", command]
 
 
-def _read_available(fd: int) -> bytes:
+def read_available(fd: int) -> bytes:
     """Read what is in the pipe now; a descendant may still hold the write end open."""
     os.set_blocking(fd, False)
     chunks = []
@@ -63,12 +75,12 @@ def _read_available(fd: int) -> bytes:
     return b"".join(chunks)
 
 
-def _setup_failure(output: str, returncode: int) -> SandboxSetupError:
+def setup_failure(output: str, returncode: int) -> SandboxSetupError:
     detail = output.strip() or f"bwrap exited with status {returncode}"
     return SandboxSetupError(f"sandbox setup failed: {detail}")
 
 
-def _signal_group(group: int, sig: int) -> None:
+def signal_group(group: int, sig: int) -> None:
     try:
         os.killpg(group, sig)
     except (ProcessLookupError, PermissionError):
@@ -77,10 +89,10 @@ def _signal_group(group: int, sig: int) -> None:
 
 
 def _kill_group(process: subprocess.Popen, sig: int) -> None:
-    _signal_group(process.pid, sig)
+    signal_group(process.pid, sig)
 
 
-def _group_alive(group: int) -> bool:
+def group_alive(group: int) -> bool:
     """Whether the process group still has processes that we may signal."""
     try:
         os.killpg(group, 0)
@@ -128,7 +140,7 @@ def _collect_output(process: subprocess.Popen, timeout: float) -> tuple[bytes, b
             timed_out = True
     if timed_out:
         _kill_group(process, signal.SIGKILL)
-        chunks.append(_read_available(fd))
+        chunks.append(read_available(fd))
     process.stdout.close()
     process.wait()
     return b"".join(chunks), timed_out
@@ -143,21 +155,59 @@ class ProcessRunner:
         # Process groups of foreground commands that still had processes
         # running (started in the background) when the command returned.
         self.leftover_groups: list[int] = []
+        # Network proxies of proxy-mode commands; each stops when its command ends.
+        self.proxies: list[NetworkProxy] = []
+        # Subagents share the runner and may start commands at the same time.
+        self._lock = threading.Lock()
+        self._log_count = 0
+        # Records a sandbox outcome event for each command run to completion.
+        self.telemetry: SessionTelemetry | None = None
 
-    def _argv(
-        self, command: str, cwd: Path, sandboxed: bool, policy: SandboxPolicy | None = None
-    ) -> tuple[list[str], int | None, int | None]:
-        """Return (argv, status read fd, status write fd). `policy` replaces the runner's policy for this command."""
+    def build_argv(
+        self,
+        command: str,
+        cwd: Path,
+        sandboxed: bool,
+        policy: SandboxPolicy | None = None,
+        network: NetworkApprovals | None = None,
+    ) -> tuple[list[str], int | None, int | None, NetworkProxy | None]:
+        """Return (argv, status read fd, status write fd, network proxy). `policy` replaces the runner's policy for this command.
+
+        A sandboxed command with network mode proxy starts with a network proxy
+        that decides its requests with `network`, the network approvals of the
+        session that runs it; without them, no host is reachable.
+        """
         if not sandboxed:
-            return _shell_argv(command), None, None
+            return _shell_argv(command), None, None, None
+        policy = policy or self.policy
+        argv_command = _shell_argv(command)
+        proxy = None
+        if policy.network == NetworkMode.PROXY:
+            proxy = self._start_proxy(command, cwd, network)
+            argv_command = bridge_command(argv_command, PROXY_SOCKET_DIR / SOCKET_NAME)
         read_fd, write_fd = os.pipe()
         try:
-            argv = build_bwrap_args(policy or self.policy, _shell_argv(command), cwd, write_fd)
+            argv = build_bwrap_args(
+                policy, argv_command, cwd, write_fd, proxy_dir=proxy.directory if proxy is not None else None
+            )
         except SandboxSetupError:
             os.close(read_fd)
             os.close(write_fd)
+            if proxy is not None:
+                proxy.close()
             raise
-        return argv, read_fd, write_fd
+        return argv, read_fd, write_fd, proxy
+
+    def _start_proxy(self, command: str, cwd: Path, network: NetworkApprovals | None) -> NetworkProxy:
+        approvals = network if network is not None else NetworkApprovals(NetworkPolicy())
+        try:
+            proxy = NetworkProxy.start(approvals, command, cwd)
+        except OSError as exc:
+            raise SandboxSetupError(f"cannot start the network proxy: {exc}") from exc
+        with self._lock:
+            self.proxies = [running for running in self.proxies if not running.closed]
+            self.proxies.append(proxy)
+        return proxy
 
     def _spawn(
         self,
@@ -166,6 +216,7 @@ class ProcessRunner:
         stdout: Any,
         status_read: int | None,
         status_write: int | None,
+        proxy: NetworkProxy | None,
     ) -> subprocess.Popen:
         try:
             return subprocess.Popen(
@@ -179,6 +230,8 @@ class ProcessRunner:
                 pass_fds=(status_write,) if status_write is not None else (),
             )
         except OSError as exc:
+            if proxy is not None:
+                proxy.close()
             if status_read is not None:
                 os.close(status_read)
                 raise SandboxSetupError(f"failed to start sandbox: {exc}") from exc
@@ -187,11 +240,18 @@ class ProcessRunner:
             if status_write is not None:
                 os.close(status_write)
 
-    def run(self, command: str, cwd: Path, sandboxed: bool, policy: SandboxPolicy | None = None) -> ExecResult:
+    def run(
+        self,
+        command: str,
+        cwd: Path,
+        sandboxed: bool,
+        policy: SandboxPolicy | None = None,
+        network: NetworkApprovals | None = None,
+    ) -> ExecResult:
         """Run a command to completion. Raises SandboxSetupError if the sandbox could not start it."""
-        argv, status_read, status_write = self._argv(command, cwd, sandboxed, policy)
+        argv, status_read, status_write, proxy = self.build_argv(command, cwd, sandboxed, policy, network)
         started = time.monotonic()
-        process = self._spawn(argv, cwd, subprocess.PIPE, status_read, status_write)
+        process = self._spawn(argv, cwd, subprocess.PIPE, status_read, status_write, proxy)
 
         try:
             raw, timed_out = _collect_output(process, self.timeout)
@@ -204,30 +264,42 @@ class ProcessRunner:
             raise
         duration = time.monotonic() - started
         output = raw.decode("utf-8", errors="replace")
-        if _group_alive(process.pid):
-            self.leftover_groups.append(process.pid)
+        if group_alive(process.pid):
+            with self._lock:
+                self.leftover_groups.append(process.pid)
 
         exit_code = process.returncode
         if status_read is not None:
-            status = _read_available(status_read)
+            status = read_available(status_read)
             os.close(status_read)
             reported = exit_code_from_status(status)
             if reported is None and not timed_out:
-                raise _setup_failure(output, exit_code)
+                if proxy is not None:
+                    proxy.close()
+                raise setup_failure(output, exit_code)
             if reported is not None:
                 exit_code = reported
+        if self.telemetry is not None:
+            self.telemetry.sandbox_outcome(sandboxed=sandboxed, exit_code=exit_code, duration=duration)
         return ExecResult(exit_code=exit_code, output=output, duration=duration, timed_out=timed_out)
 
     def start_background(
-        self, command: str, cwd: Path, sandboxed: bool, policy: SandboxPolicy | None = None
+        self,
+        command: str,
+        cwd: Path,
+        sandboxed: bool,
+        policy: SandboxPolicy | None = None,
+        network: NetworkApprovals | None = None,
     ) -> BackgroundProcess:
         """Start a command and return at once. Output goes to a log file."""
         self.log_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
-        log_path = self.log_dir / f"bg-{len(self.background) + 1}-{stamp}.log"
-        argv, status_read, status_write = self._argv(command, cwd, sandboxed, policy)
+        with self._lock:
+            self._log_count += 1
+            log_path = self.log_dir / f"bg-{self._log_count}-{stamp}.log"
+        argv, status_read, status_write, proxy = self.build_argv(command, cwd, sandboxed, policy, network)
         with log_path.open("wb") as log:
-            process = self._spawn(argv, cwd, log, status_read, status_write)
+            process = self._spawn(argv, cwd, log, status_read, status_write, proxy)
 
         exited_early = True
         try:
@@ -235,11 +307,13 @@ class ProcessRunner:
         except subprocess.TimeoutExpired:
             exited_early = False
         if exited_early and status_read is not None:
-            status = _read_available(status_read)
+            status = read_available(status_read)
             os.close(status_read)
             status_read = None
             if exit_code_from_status(status) is None:
-                raise _setup_failure(log_path.read_text(errors="replace"), process.returncode)
+                if proxy is not None:
+                    proxy.close()
+                raise setup_failure(log_path.read_text(errors="replace"), process.returncode)
 
         entry = BackgroundProcess(
             pid=process.pid,
@@ -247,7 +321,8 @@ class ProcessRunner:
             process=process,
             status_fd=status_read,
         )
-        self.background.append(entry)
+        with self._lock:
+            self.background.append(entry)
         return entry
 
     def terminate_all(self) -> None:
@@ -255,10 +330,11 @@ class ProcessRunner:
 
         That is every background command, and what foreground commands left
         running. Groups still alive after TERMINATE_GRACE_SECONDS are killed.
+        Network proxies that are still running are stopped.
         """
         groups = [entry.process.pid for entry in self.background] + self.leftover_groups
         for group in groups:
-            _signal_group(group, signal.SIGTERM)
+            signal_group(group, signal.SIGTERM)
         deadline = time.monotonic() + TERMINATE_GRACE_SECONDS
         for entry in self.background:
             try:
@@ -266,12 +342,16 @@ class ProcessRunner:
             except subprocess.TimeoutExpired:
                 continue
         for group in groups:
-            while _group_alive(group) and time.monotonic() < deadline:
+            while group_alive(group) and time.monotonic() < deadline:
                 time.sleep(POLL_SECONDS)
-            _signal_group(group, signal.SIGKILL)
+            signal_group(group, signal.SIGKILL)
         for entry in self.background:
             entry.process.wait()
             if entry.status_fd is not None:
                 os.close(entry.status_fd)
                 entry.status_fd = None
         self.leftover_groups.clear()
+        with self._lock:
+            proxies, self.proxies = self.proxies, []
+        for proxy in proxies:
+            proxy.close()

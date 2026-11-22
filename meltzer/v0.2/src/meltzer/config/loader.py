@@ -22,6 +22,10 @@ from meltzer.config.trust import (
 from meltzer.sandbox.policy import resolve
 
 CONFIG_DIR_NAME = ".meltzer"
+# MCP server settings that only the user config and the command line set.
+MCP_SERVERS_KEY = "mcp_servers"
+MCP_APPROVAL_KEY = "approval_mode"
+MCP_DEFAULT_APPROVAL_KEY = "default_tools_approval_mode"
 CONFIG_FILE_NAME = "config.toml"
 DEFAULT_SOURCE = "default"
 
@@ -110,14 +114,14 @@ class _Builder:
             if key is None:
                 raise ConfigError(f"{origin}: unknown key '{name}'")
             if key.user_only and not user_layer:
-                self.warnings.append(
-                    f"{origin}: '{name}' can only be set in the user config or on the command line; ignored"
-                )
+                self._ignored(origin, name)
                 continue
             try:
                 value = key.parse(raw)
             except ConfigValueError as exc:
                 raise ConfigError(f"{origin}: invalid value for '{name}': {exc}") from None
+            if name == MCP_SERVERS_KEY and not user_layer:
+                value = self._keep_user_mcp_settings(self._drop_user_only_mcp_settings(value, origin))
             if key.merge:
                 self._merge(name, value, origin)
                 continue
@@ -126,6 +130,48 @@ class _Builder:
                 continue
             self.values[name] = value
             self.sources[name] = origin
+
+    def _drop_user_only_mcp_settings(self, servers: dict[str, Any], origin: str) -> dict[str, Any]:
+        """Remove approval modes from MCP server entries; only the user config and the command line set them."""
+        for server, entry in servers.items():
+            if not isinstance(entry, dict):
+                continue
+            if MCP_DEFAULT_APPROVAL_KEY in entry:
+                del entry[MCP_DEFAULT_APPROVAL_KEY]
+                self._ignored(origin, f"{MCP_SERVERS_KEY}.{server}.{MCP_DEFAULT_APPROVAL_KEY}")
+            tools = entry.get("tools")
+            if not isinstance(tools, dict):
+                continue
+            for tool, settings in tools.items():
+                if isinstance(settings, dict) and MCP_APPROVAL_KEY in settings:
+                    del settings[MCP_APPROVAL_KEY]
+                    self._ignored(origin, f"{MCP_SERVERS_KEY}.{server}.tools.{tool}.{MCP_APPROVAL_KEY}")
+        return servers
+
+    def _keep_user_mcp_settings(self, servers: dict[str, Any]) -> dict[str, Any]:
+        """Copy the approval modes of earlier entries into entries of the same name that replace them."""
+        for server, entry in servers.items():
+            earlier = self.values[MCP_SERVERS_KEY].get(server)
+            if not isinstance(entry, dict) or not isinstance(earlier, dict):
+                continue
+            if MCP_DEFAULT_APPROVAL_KEY in earlier:
+                entry[MCP_DEFAULT_APPROVAL_KEY] = earlier[MCP_DEFAULT_APPROVAL_KEY]
+            earlier_tools = earlier.get("tools")
+            if not isinstance(earlier_tools, dict):
+                continue
+            for tool, settings in earlier_tools.items():
+                if not isinstance(settings, dict) or MCP_APPROVAL_KEY not in settings:
+                    continue
+                tools = entry.setdefault("tools", {})
+                if not isinstance(tools, dict):
+                    continue
+                tool_settings = tools.setdefault(tool, {})
+                if isinstance(tool_settings, dict):
+                    tool_settings[MCP_APPROVAL_KEY] = settings[MCP_APPROVAL_KEY]
+        return servers
+
+    def _ignored(self, origin: str, name: str) -> None:
+        self.warnings.append(f"{origin}: '{name}' can only be set in the user config or on the command line; ignored")
 
     def _add_source(self, name: str, origin: str) -> None:
         previous = self.sources[name]

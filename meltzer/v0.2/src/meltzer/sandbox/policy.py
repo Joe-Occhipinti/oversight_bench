@@ -5,6 +5,10 @@ Modes:
   workspace-write  read everywhere, write in the session root and /tmp; no network
   full-access      no sandbox
 
+A permission profile or a granted request can add writable directories
+(extra_writable) to either sandboxed mode, and a profile can list paths that
+sandboxed commands cannot read (deny_read).
+
 Inside the sandbox, /tmp is the session's own temporary directory (temp_dir),
 shared by the sandboxed commands of the session; the host /tmp is not visible.
 
@@ -69,6 +73,8 @@ class SandboxPolicy:
     read_only_extra: tuple[Path, ...] = ()
     # None: follows the mode (full for full-access, none otherwise).
     network_mode: NetworkMode | None = None
+    # Paths that sandboxed commands can neither read nor write, from a permission profile.
+    deny_read: tuple[Path, ...] = ()
 
     @classmethod
     def for_session(
@@ -81,6 +87,7 @@ class SandboxPolicy:
         extra_writable: tuple[Path, ...] = (),
         read_only_extra: tuple[Path, ...] = (),
         network: NetworkMode | None = None,
+        deny_read: tuple[Path, ...] = (),
     ) -> SandboxPolicy:
         return cls(
             mode=mode,
@@ -90,6 +97,7 @@ class SandboxPolicy:
             extra_writable=tuple(resolve(p) for p in extra_writable),
             read_only_extra=tuple(resolve(p) for p in read_only_extra),
             network_mode=network,
+            deny_read=tuple(resolve(p) for p in deny_read),
         )
 
     def with_grants(self, *, write: tuple[Path, ...] = (), network: NetworkMode | None = None) -> SandboxPolicy:
@@ -121,7 +129,7 @@ class SandboxPolicy:
         if self.mode == SandboxMode.FULL_ACCESS:
             return (Path("/"),)
         if self.mode == SandboxMode.READ_ONLY:
-            return ()
+            return tuple(sorted(set(self.extra_writable), key=lambda p: len(p.parts)))
         roots = {self.root, *self.extra_writable} | ({self.temp_dir} if self.temp_dir is not None else set())
         return tuple(sorted(roots, key=lambda p: len(p.parts)))
 
@@ -132,15 +140,27 @@ class SandboxPolicy:
         if self.meltzer_home is not None and self.meltzer_home not in paths:
             paths.append(self.meltzer_home)
         paths.extend(p for p in self.read_only_extra if p not in paths)
+        paths.extend(p for p in self.deny_read if p not in paths)
         return tuple(paths)
 
     def read_only_subpaths(self) -> tuple[Path, ...]:
-        """Protected paths that fall inside a writable root, deepest last."""
+        """Protected paths that fall inside a writable root or contain an extra writable directory, deepest last."""
         if self.mode == SandboxMode.FULL_ACCESS:
             return ()
         roots = self.writable_roots()
-        found = [p for p in self.protected_paths() if any(is_within(p, r) for r in roots)]
+        found = [
+            p
+            for p in self.protected_paths()
+            if any(is_within(p, r) for r in roots) or any(is_within(r, p) for r in self.extra_writable)
+        ]
         return tuple(sorted(found, key=lambda p: len(p.parts)))
+
+    def can_read(self, path: Path) -> bool:
+        """Whether the sandbox lets a command read path."""
+        if self.mode == SandboxMode.FULL_ACCESS:
+            return True
+        target = resolve(path)
+        return not any(is_within(target, denied) for denied in self.deny_read)
 
     def can_write(self, path: Path) -> bool:
         """Whether the sandbox lets a command write to path."""

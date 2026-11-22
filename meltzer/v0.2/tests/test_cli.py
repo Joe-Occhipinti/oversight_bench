@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import io
+import signal
+import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -21,10 +24,6 @@ def test_interactive_defaults(parsers):
     assert args.cd is None and args.model is None and args.sandbox is None
     assert args.config == []
     assert cli_overrides(args) == []
-
-
-def test_interactive_first_prompt(parsers):
-    interactive, _ = parsers
     assert interactive.parse_args(["explain this repo"]).prompt == "explain this repo"
 
 
@@ -80,6 +79,7 @@ class StubSession:
         self.config = SimpleNamespace(model="gpt-test")
         self.policy = SimpleNamespace(mode=SimpleNamespace(value="workspace-write"))
         self.root = root
+        self.agent_control = SimpleNamespace(prompt_lock=threading.Lock())
         self.prompts: list[str] = []
         self.closed = False
 
@@ -107,6 +107,38 @@ def test_first_prompt_then_prompts_from_stdin(tmp_path, monkeypatch):
     assert session.prompts == ["first", "second"]
 
 
+def test_prompt_is_read_while_holding_the_prompt_lock(tmp_path, monkeypatch):
+    session = StubSession(tmp_path)
+    monkeypatch.setattr(cli, "_start_session", lambda args, ui: session)
+    held: list[bool] = []
+
+    def read_prompt(self):
+        held.append(session.agent_control.prompt_lock.locked())
+        return "/exit"
+
+    monkeypatch.setattr(cli.TerminalUI, "read_prompt", read_prompt)
+    assert main([]) == 0
+    assert held == [True]
+    assert not session.agent_control.prompt_lock.locked()
+
+
 def test_missing_directory_is_a_config_error(tmp_path, capsys):
     assert main(["exec", "-C", str(tmp_path / "missing"), "go"]) == EXIT_CONFIG
     assert "directory does not exist" in capsys.readouterr().err
+
+
+def test_resume_takes_an_id_or_last_not_both(capsys):
+    with pytest.raises(SystemExit):
+        main(["resume", "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d", "--last"])
+    assert "not both" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX signals")
+@pytest.mark.parametrize("name", ["SIGTERM", "SIGHUP"])
+def test_termination_signals_close_the_session(tmp_path, monkeypatch, name):
+    session = StubSession(tmp_path)
+    monkeypatch.setattr(cli, "_start_session", lambda args, ui: session)
+    monkeypatch.setattr(cli.TerminalUI, "read_prompt", lambda self: signal.raise_signal(getattr(signal, name)))
+    with pytest.raises(SystemExit) as exc:
+        main([])
+    assert exc.value.code == 128 + getattr(signal, name) and session.closed

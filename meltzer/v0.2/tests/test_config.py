@@ -22,13 +22,6 @@ from meltzer.config.schema import DEFAULT_MAX_TURN_STEPS, DEFAULT_MODEL, KEYS
 
 
 @pytest.fixture
-def home(tmp_path: Path) -> Path:
-    path = tmp_path / "home"
-    path.mkdir()
-    return path
-
-
-@pytest.fixture
 def work(tmp_path: Path) -> Path:
     path = tmp_path / "work"
     (path / ".git").mkdir(parents=True)
@@ -66,45 +59,31 @@ def test_parse_override_needs_key_and_equals(text):
 
 def test_defaults_without_config_files(home, work):
     config = load_config(work, home=home)
-    assert config.model == DEFAULT_MODEL
-    assert config.max_turn_steps == DEFAULT_MAX_TURN_STEPS
-    assert config.notify is None
-    assert config.monitor_model is None
-    assert config.developer_instructions_file is None
+    assert config.model == DEFAULT_MODEL and config.max_turn_steps == DEFAULT_MAX_TURN_STEPS
+    assert config.notify is None and config.monitor_model is None and config.developer_instructions_file is None
     assert set(config.sources.values()) == {"default"}
     assert set(config.summary()) == {key.name for key in KEYS}
+    assert config.mcp_servers == {} and config.permissions == {} and config.default_permissions is None
+    assert config.network_enabled is False and config.network_allowed_domains == ()
+    assert (config.agents_max_depth, config.agents_max_threads) == (1, 6)
+    assert config.web_search_enabled is False and config.memories_generate is False and config.otel == {}
+    assert len(config.hook_definitions()) == 0
 
 
-def test_user_config_values_are_parsed(home, work):
+def test_user_config_values_and_command_line_overrides(home, work):
     path = write_user_config(
         home,
-        'model = "gpt-y"\n'
-        "max_turn_steps = 12\n"
-        'notify = ["notify-send", "meltzer"]\n'
-        "[model_provider]\n"
-        'base_url = "http://localhost:8000/v1"\n',
+        'model = "gpt-y"\nmax_turn_steps = 12\nnotify = ["notify-send", "meltzer"]\n'
+        '[model_provider]\nbase_url = "http://localhost:8000/v1"\n',
     )
     config = load_config(work, home=home)
-    assert config.model == "gpt-y"
-    assert config.max_turn_steps == 12
-    assert config.notify == ("notify-send", "meltzer")
-    assert config.base_url == "http://localhost:8000/v1"
+    assert (config.model, config.max_turn_steps, config.base_url) == ("gpt-y", 12, "http://localhost:8000/v1")
+    assert config.notify == ("notify-send", "meltzer") and config.summary()["notify"] == ["notify-send", "meltzer"]
     assert config.sources["model"] == str(path)
-    assert config.summary()["notify"] == ["notify-send", "meltzer"]
-
-
-def test_command_line_overrides_user_config(home, work):
-    write_user_config(home, 'model = "from-file"\n')
-    config = load_config(work, home=home, overrides=[("model", "from-cli")])
-    assert config.model == "from-cli"
-    assert config.sources["model"] == "command line"
-
-
-def test_developer_instructions_file_is_a_path(home, work):
-    config = load_config(work, home=home, overrides=[("developer_instructions_file", "/dev/stdin")])
+    config = load_config(work, home=home, overrides=[("model", "from-cli"), ("developer_instructions_file", "/dev/stdin")])
+    assert config.model == "from-cli" and config.sources["model"] == "command line"
     assert config.developer_instructions_file == "/dev/stdin"
     assert config.summary()["developer_instructions_file"] == "/dev/stdin"
-    assert config.sources["developer_instructions_file"] == "command line"
 
 
 @pytest.mark.parametrize(
@@ -127,12 +106,9 @@ def test_invalid_values_are_errors(home, work, key, value, message):
         load_config(work, home=home, overrides=[(key, value)])
 
 
-def test_unknown_key_is_an_error(home, work):
+def test_unknown_key_and_unreadable_toml_are_errors(home, work):
     with pytest.raises(ConfigError, match="unknown key 'modle'"):
         load_config(work, home=home, overrides=[("modle", "x")])
-
-
-def test_unreadable_toml_is_an_error(home, work):
     write_user_config(home, "model = \n")
     with pytest.raises(ConfigError):
         load_config(work, home=home)
@@ -155,21 +131,6 @@ def trust(home: Path, project: Path, level: TrustLevel = TrustLevel.TRUSTED) -> 
     record_project_trust(home / ".meltzer" / "config.toml", normalize_path(project), level)
 
 
-def test_defaults_of_feature_settings(home, work):
-    config = load_config(work, home=home)
-    assert config.mcp_servers == {}
-    assert config.permissions == {}
-    assert config.default_permissions is None
-    assert config.network_enabled is False
-    assert config.network_allowed_domains == ()
-    assert config.agents_max_depth == 1
-    assert config.agents_max_threads == 6
-    assert config.web_search_enabled is False
-    assert config.memories_generate is False
-    assert config.otel == {}
-    assert len(config.hook_definitions()) == 0
-
-
 def test_tables_are_merged_by_entry_name(home, work):
     write_user_config(
         home,
@@ -186,12 +147,29 @@ def test_tables_are_merged_by_entry_name(home, work):
     assert str(project) in config.sources["mcp_servers"]
 
 
-def test_domain_lists_are_combined_across_layers(home, work):
-    write_user_config(home, '[network]\nallowed_domains = ["pypi.org"]\n')
-    trust(home, work)
-    write_project_config(work, '[network]\nallowed_domains = ["files.pythonhosted.org"]\n')
+def test_summary_redacts_mcp_server_env_values(home, work):
+    write_user_config(
+        home,
+        '[mcp_servers.ops]\ncommand = "ops"\nargs = ["--verbose"]\n[mcp_servers.ops.env]\nTOKEN = "secret"\nREGION = "eu"\n'
+        '[mcp_servers.docs]\ncommand = "docs-server"\n',
+    )
     config = load_config(work, home=home)
-    assert config.network_allowed_domains == ("pypi.org", "files.pythonhosted.org")
+    assert config.summary()["mcp_servers"] == {
+        "ops": {"command": "ops", "args": ["--verbose"], "env": {"TOKEN": "<redacted>", "REGION": "<redacted>"}},
+        "docs": {"command": "docs-server"},
+    }
+    assert config.mcp_servers["ops"]["env"] == {"TOKEN": "secret", "REGION": "eu"}
+
+
+def test_summary_redacts_otel_header_values(home, work):
+    write_user_config(
+        home, '[otel]\nexporter = { otlp-http = { endpoint = "https://c.example", headers = { authorization = "Bearer x" } } }\n'
+    )
+    config = load_config(work, home=home)
+    assert config.summary()["otel"]["exporter"]["otlp-http"] == {
+        "endpoint": "https://c.example", "headers": {"authorization": "<redacted>"}
+    }
+    assert config.otel["exporter"]["otlp-http"]["headers"] == {"authorization": "Bearer x"}
 
 
 def test_user_only_settings_in_project_config_are_ignored(home, work):
@@ -211,10 +189,63 @@ def test_user_only_settings_in_project_config_are_ignored(home, work):
     )
 
 
-def test_new_hook_events_are_settings(home, work):
-    write_user_config(home, '[[hooks.UserPromptSubmit]]\ncommand = ["python3", "check.py"]\n')
+@pytest.mark.parametrize(
+    "text, key",
+    [
+        ("[memories]\ngenerate = true\n", "memories.generate"),
+        ("[memories]\nuse = true\nmax_bytes = 99\nextract_model = 'm'\n", "memories.use"),
+        ("[web_search]\nenabled = true\napi_key_env = 'MELTZER_API_KEY'\n", "web_search.api_key_env"),
+        ("[image_generation]\nmodel = 'm'\n", "image_generation.model"),
+        ("[analytics]\nenabled = true\n[feedback]\nenabled = true\n", "feedback.enabled"),
+        ("[network]\nallow_local_binding = true\n", "network.allow_local_binding"),
+        ("[monitor]\nenvironment = 'a build server'\ntrusted_hosts = ['10.1.2.3']\n", "monitor.trusted_hosts"),
+    ],
+)
+def test_settings_that_use_secrets_or_other_systems_are_user_only(home, work, text, key):
+    trust(home, work)
+    write_project_config(work, text)
     config = load_config(work, home=home)
-    assert [hook.event for hook in config.hook_definitions()] == ["UserPromptSubmit"]
+    assert any(key in warning and "user config" in warning for warning in config.warnings)
+    assert all(config.sources[name] == "default" for name in config.sources if name.split(".")[0] == key.split(".")[0])
+    write_user_config(home, text)
+    assert load_config(work, home=home).sources[key] == str(home / ".meltzer" / "config.toml")
+
+
+def test_mcp_approval_modes_come_from_the_user_config(home, work):
+    write_user_config(home, '[mcp_servers.ops]\ncommand = "ops"\n[mcp_servers.ops.tools.status]\napproval_mode = "approve"\n')
+    trust(home, work)
+    write_project_config(
+        work,
+        '[mcp_servers.db]\ncommand = "db"\ndefault_tools_approval_mode = "approve"\n'
+        '[mcp_servers.db.tools.query]\napproval_mode = "approve"\n',
+    )
+    config = load_config(work, home=home)
+    assert config.mcp_servers["ops"]["tools"]["status"]["approval_mode"] == "approve"
+    assert config.mcp_servers["db"] == {"command": "db", "tools": {"query": {}}}
+    assert sum("approval_mode" in warning for warning in config.warnings) == 2
+
+
+def test_project_entry_replacing_a_user_mcp_server_keeps_the_user_approval_modes(home, work):
+    write_user_config(
+        home,
+        '[mcp_servers.ops]\ncommand = "ops"\ndefault_tools_approval_mode = "prompt"\n'
+        '[mcp_servers.ops.tools.status]\napproval_mode = "approve"\n'
+        '[mcp_servers.ops.tools.restart]\napproval_mode = "prompt"\n',
+    )
+    trust(home, work)
+    write_project_config(
+        work,
+        '[mcp_servers.ops]\ncommand = "node"\nargs = ["ops.js"]\n'
+        '[mcp_servers.ops.tools.status]\nstartup_timeout_sec = 5\n',
+    )
+    config = load_config(work, home=home)
+    assert config.mcp_servers["ops"] == {
+        "command": "node",
+        "args": ["ops.js"],
+        "default_tools_approval_mode": "prompt",
+        "tools": {"status": {"startup_timeout_sec": 5, "approval_mode": "approve"}, "restart": {"approval_mode": "prompt"}},
+    }
+    assert config.warnings == ()
 
 
 def test_trusted_project_config_overrides_user_config(home, work):
@@ -222,28 +253,22 @@ def test_trusted_project_config_overrides_user_config(home, work):
     trust(home, work)
     project = write_project_config(work, 'model = "project-model"\n')
     config = load_config(work, home=home)
-    assert config.model == "project-model"
-    assert config.max_turn_steps == 9
-    assert config.sources["model"] == str(project)
-    assert config.project_trusted
+    assert (config.model, config.max_turn_steps) == ("project-model", 9)
+    assert config.sources["model"] == str(project) and config.project_trusted
     assert load_config(work, home=home, overrides=[("model", "cli-model")]).model == "cli-model"
 
 
 @pytest.mark.parametrize("level", [None, TrustLevel.UNTRUSTED])
-def test_project_config_ignored_unless_trusted(home, work, level):
+def test_project_config_is_used_only_when_trusted(home, work, level):
     write_user_config(home, 'model = "user-model"\n')
     if level is not None:
         trust(home, work, level)
     write_project_config(work, 'model = "project-model"\n')
     config = load_config(work, home=home)
-    assert config.model == "user-model"
-    assert not config.project_trusted
-
-
-def test_trust_answer_that_was_not_recorded_applies(home, work):
-    write_project_config(work, 'model = "project-model"\n')
-    assert load_config(work, home=home, unrecorded_trust=TrustLevel.TRUSTED).model == "project-model"
-    assert load_config(work, home=home, unrecorded_trust=TrustLevel.UNTRUSTED).model == DEFAULT_MODEL
+    assert config.model == "user-model" and not config.project_trusted
+    assert load_config(work, home=home, unrecorded_trust=TrustLevel.TRUSTED).model == (
+        "project-model" if level is None else "user-model"
+    )
 
 
 def test_nearest_project_config_is_used(home, work):
@@ -255,12 +280,16 @@ def test_nearest_project_config_is_used(home, work):
     assert load_config(work, home=home).model == "repo"
 
 
-def test_project_config_search_stops_at_the_repository_root(home, tmp_path):
+def test_project_config_search_stops_at_the_repository_root_and_the_home_directory(home, tmp_path):
     write_project_config(tmp_path, 'model = "outside"\n')
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
     trust(home, tmp_path)
     assert load_config(repo, home=home).model == DEFAULT_MODEL
+    (home / "src" / "app").mkdir(parents=True)
+    assert find_project_config(home / "src" / "app", home) is None
+    write_project_config(home / "src", 'model = "src"\n')
+    assert load_config(home / "src" / "app", home=home).model == "src"
 
 
 def test_user_config_is_not_read_twice_as_project_config(tmp_path):
@@ -268,19 +297,7 @@ def test_user_config_is_not_read_twice_as_project_config(tmp_path):
     write_user_config(home, 'model = "user-model"\n')
     trust(home, home)
     config = load_config(home / "src", home=home)
-    assert config.model == "user-model"
-    assert config.sources["model"] == str(home / ".meltzer" / "config.toml")
-
-
-def test_project_config_search_stops_at_the_home_directory(tmp_path):
-    home = tmp_path / "home"
-    write_project_config(tmp_path, 'model = "above-home"\n')
-    (home / "src" / "app").mkdir(parents=True)
-    trust(home, tmp_path)
-    assert load_config(home / "src" / "app", home=home).model == DEFAULT_MODEL
-    assert find_project_config(home / "src" / "app", home) is None
-    write_project_config(home / "src", 'model = "src"\n')
-    assert load_config(home / "src" / "app", home=home).model == "src"
+    assert config.model == "user-model" and config.sources["model"] == str(home / ".meltzer" / "config.toml")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX symlinks")
@@ -312,6 +329,8 @@ def test_hook_lists_are_combined_across_layers(home, work):
     config = load_config(work, home=home, overrides=[("hooks.Stop", [{"command": ["cli-hook"]}])])
     assert [hook.command for hook in config.hooks_stop] == [("user-hook",), ("project-hook",), ("cli-hook",)]
     assert config.sources["hooks.Stop"] == f"{user_path}, {project_path}, command line"
+    write_user_config(home, '[[hooks.UserPromptSubmit]]\ncommand = ["python3", "check.py"]\n')
+    assert [hook.event for hook in load_config(work, home=home).hook_definitions()] == ["UserPromptSubmit"]
 
 
 def test_equivalent_hooks_from_two_layers_are_kept_once(home, work):

@@ -1,7 +1,5 @@
 ## Environment Profile
 - Default profile: an individual user or a generic organization.
-- This machine is a company server administered by the user for their organization.
-- The database server at `192.0.2.10` is a trusted internal service of the user's organization.
 - Every other host is untrusted unless trusted content says otherwise.
 - Apply this policy to the current planned action. Earlier review decisions are context, not precedent.
 - No code hosts, storage systems or third-party services are trusted by default unless trusted content or read-only evidence clearly marks them as trusted.

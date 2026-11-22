@@ -3,12 +3,16 @@
 Rules files use a small Starlark subset, one call per rule:
 
     prefix_rule(pattern=["cargo", "check"], decision="allow")
-    prefix_rule(pattern=["git", ["status", "diff", "log"]])
+    prefix_rule(pattern=["git", ["status", "diff", "log"]], match=["git status"], not_match=["git push"])
+    prefix_rule(pattern=["git", "push"], decision="prompt", justification="Pushes need a review.")
     prefix_rule(pattern=["rm", "-rf"], decision="forbidden", justification="Use trash instead.")
 
 `pattern` lists the leading tokens of a command; a list element gives
-alternatives for that position. `decision` is "allow" (the default) or
-"forbidden". `justification` is shown when a forbidden rule rejects a command.
+alternatives for that position. `decision` is "allow" (the default), "prompt"
+or "forbidden". `justification` is shown when a forbidden rule rejects a
+command and when a prompt rule sends one to review. `match` and `not_match` are
+example commands (strings, or lists of tokens) that the rule must and must not
+match; they are checked when the file is loaded.
 
 "Always allow" answers are stored in ~/.meltzer/rules/default.rules.
 """
@@ -21,6 +25,7 @@ import json
 import posixpath
 import re
 import shlex
+import threading
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -76,8 +81,16 @@ DOUBLE_QUOTE_ESCAPES = frozenset('$`"\\')
 
 
 class RuleDecision(StrEnum):
+    # The command runs outside the sandbox without review.
     ALLOW = "allow"
+    # The command is reviewed, then runs in the sandbox unless escalation was asked.
+    PROMPT = "prompt"
     FORBIDDEN = "forbidden"
+
+
+# Strictest first: when parts of a command match rules with different
+# decisions, the first decision in this order applies.
+DECISION_ORDER: tuple[RuleDecision, ...] = (RuleDecision.FORBIDDEN, RuleDecision.PROMPT, RuleDecision.ALLOW)
 
 
 @dataclass(frozen=True)
@@ -229,6 +242,37 @@ def _pattern_alternatives(value: Any) -> list[tuple[str, ...]]:
     return [tuple(combo) for combo in itertools.product(*positions)]
 
 
+def _examples(value: Any, name: str) -> list[tuple[str, ...]]:
+    """Example commands of a rule: strings are split into words as the shell does."""
+    if not isinstance(value, list):
+        raise RulesFileError(f"'{name}' must be a list of commands")
+    examples: list[tuple[str, ...]] = []
+    for element in value:
+        if isinstance(element, str):
+            tokens = shell_tokens(element)
+            if tokens is None or any(is_operator for _, is_operator in tokens):
+                raise RulesFileError(f"'{name}' example {element!r} is not a single command")
+            if not tokens:
+                raise RulesFileError(f"'{name}' examples cannot be empty")
+            examples.append(tuple(text for text, _ in tokens))
+        elif isinstance(element, list) and element and all(isinstance(token, str) for token in element):
+            examples.append(tuple(element))
+        else:
+            raise RulesFileError(f"'{name}' examples must be strings or non-empty lists of strings")
+    return examples
+
+
+def _check_examples(
+    rules: list[PrefixRule], matches: list[tuple[str, ...]], not_matches: list[tuple[str, ...]]
+) -> None:
+    for example in matches:
+        if not any(rule.matches(example) for rule in rules):
+            raise RulesFileError(f"'match' example {shlex.join(example)!r} does not match the pattern")
+    for example in not_matches:
+        if any(rule.matches(example) for rule in rules):
+            raise RulesFileError(f"'not_match' example {shlex.join(example)!r} matches the pattern")
+
+
 def _literal_kwargs(call: ast.Call) -> dict[str, Any]:
     if call.args:
         raise RulesFileError("prefix_rule takes keyword arguments only")
@@ -245,7 +289,7 @@ def _literal_kwargs(call: ast.Call) -> dict[str, Any]:
 
 def _rules_from_call(call: ast.Call, source: str) -> list[PrefixRule]:
     kwargs = _literal_kwargs(call)
-    unknown = set(kwargs) - {"pattern", "decision", "justification"}
+    unknown = set(kwargs) - {"pattern", "decision", "justification", "match", "not_match"}
     if unknown:
         raise RulesFileError(f"unknown argument(s): {', '.join(sorted(unknown))}")
     if "pattern" not in kwargs:
@@ -253,18 +297,22 @@ def _rules_from_call(call: ast.Call, source: str) -> list[PrefixRule]:
     try:
         decision = RuleDecision(kwargs.get("decision", RuleDecision.ALLOW.value))
     except ValueError:
-        raise RulesFileError("'decision' must be \"allow\" or \"forbidden\"") from None
+        raise RulesFileError("'decision' must be \"allow\", \"prompt\" or \"forbidden\"") from None
     justification = kwargs.get("justification", "")
     if not isinstance(justification, str):
         raise RulesFileError("'justification' must be a string")
     patterns = _pattern_alternatives(kwargs["pattern"])
+    matches = _examples(kwargs.get("match", []), "match")
+    not_matches = _examples(kwargs.get("not_match", []), "not_match")
     if decision == RuleDecision.ALLOW:
         banned = [p for p in patterns if is_banned(p)]
         if banned:
             raise RulesFileError(
                 f"pattern {shlex.join(banned[0])!r} is too broad for an allow rule; use a longer prefix"
             )
-    return [PrefixRule(pattern, decision, source, justification) for pattern in patterns]
+    rules = [PrefixRule(pattern, decision, source, justification) for pattern in patterns]
+    _check_examples(rules, matches, not_matches)
+    return rules
 
 
 # A line that starts a new top-level call, such as `prefix_rule(`.
@@ -339,6 +387,10 @@ def format_rule(pattern: tuple[str, ...], decision: RuleDecision = RuleDecision.
     return f"prefix_rule(pattern=[{tokens}], decision={json.dumps(decision.value)})\n"
 
 
+# Serializes "always allow" answers, which several agents of one session may give at once.
+_ALLOW_ALWAYS_LOCK = threading.Lock()
+
+
 class RuleSet:
     def __init__(self, rules: list[PrefixRule], user_dir: Path, warnings: list[str] | None = None):
         self.rules = list(rules)
@@ -381,25 +433,35 @@ class RuleSet:
     def _match_part(self, tokens: tuple[str, ...]) -> list[PrefixRule]:
         return [rule for rule in self.rules if rule.matches(tokens)]
 
+    def matching_rules(self, command: str) -> list[PrefixRule]:
+        """Every rule that matches a part of the command, in the order of the parts."""
+        parts = split_command(command)
+        if parts is None:
+            return []
+        return [rule for tokens in parts for rule in self._match_part(tokens)]
+
     def evaluate(self, command: str) -> RuleMatch | None:
-        """Forbidden if any part matches a forbidden rule; allowed if every part matches an allow rule."""
+        """The rule decision for a command, or None if no rule applies.
+
+        Each part of the command is matched on its own. The command is
+        forbidden if any part matches a forbidden rule; otherwise it needs
+        review if any part matches a prompt rule; otherwise it is allowed if a
+        part matches an allow rule.
+        """
         parts = split_command(command)
         if parts is None:
             return None
-        allowed: list[PrefixRule] = []
-        every_part_allowed = True
+        matched: dict[RuleDecision, list[PrefixRule]] = {}
         for tokens in parts:
-            matched = self._match_part(tokens)
-            forbidden = [r for r in matched if r.decision == RuleDecision.FORBIDDEN]
-            if forbidden:
-                return RuleMatch(RuleDecision.FORBIDDEN, (forbidden[0],))
-            allow = [r for r in matched if r.decision == RuleDecision.ALLOW]
-            if allow:
-                allowed.append(allow[0])
-            else:
-                every_part_allowed = False
-        if every_part_allowed:
-            return RuleMatch(RuleDecision.ALLOW, tuple(allowed))
+            rules = self._match_part(tokens)
+            for decision in DECISION_ORDER:
+                rule = next((r for r in rules if r.decision == decision), None)
+                if rule is not None:
+                    matched.setdefault(decision, []).append(rule)
+                    break
+        for decision in DECISION_ORDER:
+            if decision in matched:
+                return RuleMatch(decision, tuple(matched[decision]))
         return None
 
     def suggest_prefix(self, command: str) -> tuple[str, ...]:
@@ -417,11 +479,12 @@ class RuleSet:
         if not prefix or is_banned(prefix):
             raise ValueError(f"prefix cannot be allowed persistently: {shlex.join(prefix)!r}")
         path = self.user_dir / DEFAULT_RULES_FILE
-        self.user_dir.mkdir(parents=True, exist_ok=True)
-        # Start on a new line if the file was last edited by hand without a final newline.
-        existing = path.read_bytes() if path.is_file() else b""
-        separator = "\n" if existing and not existing.endswith(b"\n") else ""
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(separator + format_rule(prefix))
-        self.rules.append(PrefixRule(prefix, RuleDecision.ALLOW, str(path)))
+        with _ALLOW_ALWAYS_LOCK:
+            self.user_dir.mkdir(parents=True, exist_ok=True)
+            # Start on a new line if the file was last edited by hand without a final newline.
+            existing = path.read_bytes() if path.is_file() else b""
+            separator = "\n" if existing and not existing.endswith(b"\n") else ""
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(separator + format_rule(prefix))
+            self.rules.append(PrefixRule(prefix, RuleDecision.ALLOW, str(path)))
         return path

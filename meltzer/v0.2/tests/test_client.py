@@ -60,10 +60,12 @@ def test_request_payload_and_headers():
 
 
 def test_no_tools_and_model_override():
-    server = Server(httpx.Response(200, json=completion({"content": "ok"})))
-    make_client(server).complete([], [], model="other")
-    body = json.loads(server.requests[0].content)
-    assert body == {"model": "other", "messages": []}
+    server = Server(httpx.Response(200, json=completion({"content": "ok"})), httpx.Response(200, text="<html>"))
+    chat = make_client(server)
+    chat.complete([], [], model="other")
+    assert json.loads(server.requests[0].content) == {"model": "other", "messages": []}
+    with pytest.raises(ModelError, match="invalid JSON"):
+        chat.complete([], [])
 
 
 def test_retries_server_errors_then_succeeds():
@@ -89,12 +91,6 @@ def test_client_errors_are_not_retried(status):
     with pytest.raises(ModelError, match=f"HTTP {status}"):
         make_client(server).complete([], [])
     assert len(server.requests) == 1
-
-
-def test_invalid_json_body():
-    server = Server(httpx.Response(200, text="<html>"))
-    with pytest.raises(ModelError, match="invalid JSON"):
-        make_client(server).complete([], [])
 
 
 def test_parse_tool_calls():
@@ -127,9 +123,6 @@ def test_parse_keeps_reasoning_fields():
 def test_parse_content_parts():
     response = parse_response(completion({"content": [{"type": "text", "text": "a"}, {"type": "text", "text": "b"}]}))
     assert response.content == "ab"
-
-
-def test_parse_content_parts_without_text():
     parts = [{"type": "text", "text": None}, {"type": "image_url"}, {"type": "text", "text": "ok"}]
     assert parse_response(completion({"content": parts})).content == "ok"
     assert parse_response(completion({"content": [{"type": "text", "text": None}]})).content is None

@@ -11,9 +11,9 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from meltzer.tools.registry import ToolError, ToolRegistry, ToolSpec, optional_string, require_string
+from meltzer.tools.registry import Tool, ToolError, ToolRegistry, ToolSpec, optional_string, require_string
 
 READ_FILE_MAX_LINES = 300
 READ_FILE_HEAD_LINES = 120
@@ -26,9 +26,12 @@ GREP_MAX_LINE_CHARS = 400
 GREP_SKIP_DIRS = {".git"}
 
 
-def _resolve(cwd: Path, value: str) -> Path:
+def _resolve(cwd: Path, value: str, can_read: Callable[[Path], bool]) -> Path:
     path = Path(value).expanduser()
-    return path if path.is_absolute() else cwd / path
+    path = path if path.is_absolute() else cwd / path
+    if not can_read(path):
+        raise ToolError(f"cannot read {path}: access denied")
+    return path
 
 
 def _read_bytes(path: Path) -> bytes:
@@ -52,7 +55,7 @@ def truncate_lines(lines: list[str]) -> list[str]:
     return [*lines[:READ_FILE_HEAD_LINES], f"<truncated {omitted} lines/>", *lines[-READ_FILE_TAIL_LINES:]]
 
 
-class ReadFileTool:
+class ReadFileTool(Tool):
     spec = ToolSpec(
         name="read_file",
         description=(
@@ -67,11 +70,12 @@ class ReadFileTool:
         },
     )
 
-    def __init__(self, cwd: Path):
+    def __init__(self, cwd: Path, can_read: Callable[[Path], bool]):
         self.cwd = cwd
+        self.can_read = can_read
 
     def run(self, arguments: dict[str, Any]) -> str:
-        path = _resolve(self.cwd, require_string(arguments, "path"))
+        path = _resolve(self.cwd, require_string(arguments, "path"), self.can_read)
         if not path.is_file():
             raise ToolError(f"not a file: {path}")
         data = _read_bytes(path)
@@ -81,7 +85,7 @@ class ReadFileTool:
         return "\n".join(truncate_lines(lines))
 
 
-class ListDirTool:
+class ListDirTool(Tool):
     spec = ToolSpec(
         name="list_dir",
         description="List a directory. Directories end with '/', symbolic links show their target.",
@@ -92,11 +96,12 @@ class ListDirTool:
         },
     )
 
-    def __init__(self, cwd: Path):
+    def __init__(self, cwd: Path, can_read: Callable[[Path], bool]):
         self.cwd = cwd
+        self.can_read = can_read
 
     def run(self, arguments: dict[str, Any]) -> str:
-        path = _resolve(self.cwd, optional_string(arguments, "path") or ".")
+        path = _resolve(self.cwd, optional_string(arguments, "path") or ".", self.can_read)
         if not path.is_dir():
             raise ToolError(f"not a directory: {path}")
         try:
@@ -120,7 +125,7 @@ class ListDirTool:
         return "\n".join(lines) if lines else f"{path} is empty"
 
 
-class GrepTool:
+class GrepTool(Tool):
     spec = ToolSpec(
         name="grep",
         description=(
@@ -138,8 +143,9 @@ class GrepTool:
         },
     )
 
-    def __init__(self, cwd: Path):
+    def __init__(self, cwd: Path, can_read: Callable[[Path], bool]):
         self.cwd = cwd
+        self.can_read = can_read
 
     def _files(self, path: Path) -> list[Path]:
         if path.is_file():
@@ -155,13 +161,13 @@ class GrepTool:
             pattern = re.compile(require_string(arguments, "pattern"))
         except re.error as exc:
             raise ToolError(f"invalid pattern: {exc}") from exc
-        path = _resolve(self.cwd, optional_string(arguments, "path") or ".")
+        path = _resolve(self.cwd, optional_string(arguments, "path") or ".", self.can_read)
         if not path.exists():
             raise ToolError(f"no such file or directory: {path}")
         matches: list[str] = []
         for file in self._files(path):
             try:
-                if not file.is_file() or file.stat().st_size > MAX_FILE_BYTES:
+                if not file.is_file() or not self.can_read(file) or file.stat().st_size > MAX_FILE_BYTES:
                     continue
                 data = file.read_bytes()
             except OSError:
@@ -178,5 +184,5 @@ class GrepTool:
         return "\n".join(matches) if matches else "no matches"
 
 
-def review_tools(cwd: Path) -> ToolRegistry:
-    return ToolRegistry([ReadFileTool(cwd), ListDirTool(cwd), GrepTool(cwd)])
+def review_tools(cwd: Path, can_read: Callable[[Path], bool]) -> ToolRegistry:
+    return ToolRegistry([ReadFileTool(cwd, can_read), ListDirTool(cwd, can_read), GrepTool(cwd, can_read)])

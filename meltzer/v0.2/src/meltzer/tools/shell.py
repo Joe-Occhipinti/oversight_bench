@@ -7,10 +7,10 @@ from typing import Any
 
 from meltzer.approval.orchestrator import ApprovalOrchestrator, CommandRequest
 from meltzer.exec import ProcessRunner
+from meltzer.network.policy import NetworkApprovals
 from meltzer.sandbox.bwrap import SandboxSetupError
-from meltzer.tools.registry import ToolError, ToolSpec, optional_bool, optional_string, require_string
-
-MAX_OUTPUT_CHARS = 30_000
+from meltzer.tools.registry import Tool, ToolError, ToolSpec, optional_bool, optional_string, require_string, resolve_workdir
+from meltzer.utils.truncate import truncate_output
 
 SHELL_SPEC = ToolSpec(
     name="shell",
@@ -50,35 +50,25 @@ SHELL_SPEC = ToolSpec(
 )
 
 
-def truncate_output(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
-    if len(text) <= limit:
-        return text
-    half = limit // 2
-    omitted = len(text) - 2 * half
-    return f"{text[:half]}\n[... {omitted} characters omitted ...]\n{text[-half:]}"
-
-
-class ShellTool:
+class ShellTool(Tool):
     spec = SHELL_SPEC
 
-    def __init__(self, root: Path, orchestrator: ApprovalOrchestrator, runner: ProcessRunner):
+    def __init__(
+        self,
+        root: Path,
+        orchestrator: ApprovalOrchestrator,
+        runner: ProcessRunner,
+        network: NetworkApprovals | None = None,
+    ):
         self.root = root
         self.orchestrator = orchestrator
         self.runner = runner
-
-    def _workdir(self, value: str | None) -> Path:
-        if not value:
-            return self.root
-        path = Path(value)
-        if not path.is_absolute():
-            path = self.root / path
-        if not path.is_dir():
-            raise ToolError(f"workdir does not exist or is not a directory: {path}")
-        return path
+        # The session's network approvals, for commands that use the network proxy.
+        self.network = network
 
     def run(self, arguments: dict[str, Any]) -> str:
         command = require_string(arguments, "command")
-        workdir = self._workdir(optional_string(arguments, "workdir"))
+        workdir = resolve_workdir(self.root, optional_string(arguments, "workdir"))
         escalate = optional_bool(arguments, "escalate")
         background = optional_bool(arguments, "background")
         justification = (optional_string(arguments, "justification") or "").strip()
@@ -96,14 +86,20 @@ class ShellTool:
         if not decision.run:
             raise ToolError(f"command not run: {decision.reason}")
 
+        # The session's current policy, including permissions granted to it.
+        policy = self.orchestrator.sandbox
         try:
             if background:
-                process = self.runner.start_background(command, workdir, sandboxed=decision.sandboxed)
+                process = self.runner.start_background(
+                    command, workdir, sandboxed=decision.sandboxed, policy=policy, network=self.network
+                )
                 return (
                     f"Started background process {process.pid}\n"
                     f"Log file: {process.log_path}"
                 )
-            result = self.runner.run(command, workdir, sandboxed=decision.sandboxed)
+            result = self.runner.run(
+                command, workdir, sandboxed=decision.sandboxed, policy=policy, network=self.network
+            )
         except SandboxSetupError as exc:
             raise ToolError(f"command not run: {exc}") from exc
         except OSError as exc:

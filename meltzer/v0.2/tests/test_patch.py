@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from meltzer.approval.orchestrator import PatchDecision, PatchRequest
+from meltzer.sandbox.policy import SandboxMode, SandboxPolicy
 from meltzer.tools.apply_patch import (
     AddFile,
     ApplyPatchTool,
@@ -14,23 +15,28 @@ from meltzer.tools.apply_patch import (
     FileChange,
     PatchError,
     UpdateFile,
-    _write_all,
+    write_all,
     apply_chunks,
     parse_patch,
 )
 from meltzer.tools.registry import ToolError
 
-# Files are written through directory file descriptors (dir_fd), which need POSIX.
-needs_posix = pytest.mark.skipif(sys.platform == "win32", reason="needs POSIX file APIs")
+from conftest import needs_posix
+
 
 
 def patch(*body: str) -> str:
     return "\n".join(["*** Begin Patch", *body, "*** End Patch"]) + "\n"
 
 
-def planner(root: Path) -> ApplyPatchTool:
-    # plan() only reads files; the approval orchestrator is used when the patch is applied.
-    return ApplyPatchTool(root.resolve(), orchestrator=None)
+def workspace_policy(root: Path, deny_read: tuple[Path, ...] = ()) -> SandboxPolicy:
+    return SandboxPolicy.for_session(SandboxMode.WORKSPACE_WRITE, root, deny_read=deny_read)
+
+
+def planner(root: Path, deny_read: tuple[Path, ...] = ()) -> ApplyPatchTool:
+    # plan() only reads files and checks the sandbox policy; the approval orchestrator decides when the patch is applied.
+    orchestrator = SimpleNamespace(sandbox=workspace_policy(root, deny_read))
+    return ApplyPatchTool(root.resolve(), orchestrator)
 
 
 def test_parse_add_delete_update():
@@ -59,14 +65,8 @@ def test_parse_first_chunk_without_header_and_move():
     assert hunk.move_to == "y.py"
     assert hunk.chunks[0].context is None
     assert hunk.chunks[0].old_lines == ["a"]
-
-
-def test_parse_move_only():
     (hunk,) = parse_patch(patch("*** Update File: x.py", "*** Move to: y.py"))
     assert hunk.chunks == [] and hunk.move_to == "y.py"
-
-
-def test_parse_tolerates_blank_lines_between_hunks():
     hunks = parse_patch(patch("*** Delete File: a", "", "*** Delete File: b"))
     assert [h.path for h in hunks] == ["a", "b"]
 
@@ -94,66 +94,50 @@ def chunks(*body: str):
     return parse_patch(patch("*** Update File: f", *body))[0].chunks
 
 
-def test_apply_replaces_lines_after_context():
-    original = "def a():\n    return 1\n\ndef b():\n    return 1\n"
-    updated = apply_chunks(original, chunks("@@ def b():", "-    return 1", "+    return 2"), "f")
-    assert updated == "def a():\n    return 1\n\ndef b():\n    return 2\n"
-
-
-def test_apply_several_chunks_in_order():
-    original = "1\n2\n3\n4\n5\n"
-    updated = apply_chunks(original, chunks("@@", "-2", "+two", "@@", "-4", "+four"), "f")
-    assert updated == "1\ntwo\n3\nfour\n5\n"
-
-
-def test_apply_ignores_trailing_whitespace_differences():
-    assert apply_chunks("a  \nb\n", chunks(" a", "-b", "+c"), "f") == "a\nc\n"
-
-
-def test_apply_end_of_file_matches_last_occurrence():
-    original = "x\nend\nx\nend\n"
-    assert apply_chunks(original, chunks(" x", "-end", "+END", "*** End of File"), "f") == "x\nend\nx\nEND\n"
-
-
-def test_apply_insertion_goes_after_the_context_line():
-    original = "import os\n\ndef main():\n    pass\n"
-    updated = apply_chunks(original, chunks("@@ import os", "+import sys"), "f")
-    assert updated == "import os\nimport sys\n\ndef main():\n    pass\n"
-
-
-def test_apply_insertion_before_a_later_change():
-    original = "a\nb\nc\n"
-    updated = apply_chunks(original, chunks("@@ a", "+inserted", "@@", "-b", "+B"), "f")
-    assert updated == "a\ninserted\nB\nc\n"
-
-
-def test_apply_insertion_without_context_appends():
-    assert apply_chunks("a\n", chunks("+b"), "f") == "a\nb\n"
-
-
 def test_missing_path_error_names_the_header_line():
     with pytest.raises(PatchError, match="missing file path at line 3"):
         parse_patch("*** Begin Patch\n*** Add File: a.txt\n*** Add File: \n+x\n*** End Patch\n")
 
 
-def test_apply_adds_trailing_newline():
-    assert apply_chunks("a\nb", chunks(" a", "-b", "+c"), "f") == "a\nc\n"
+@pytest.mark.parametrize(
+    "original, body, expected",
+    [
+        (
+            "def a():\n    return 1\n\ndef b():\n    return 1\n",
+            ["@@ def b():", "-    return 1", "+    return 2"],
+            "def a():\n    return 1\n\ndef b():\n    return 2\n",
+        ),
+        ("1\n2\n3\n4\n5\n", ["@@", "-2", "+two", "@@", "-4", "+four"], "1\ntwo\n3\nfour\n5\n"),
+        ("a  \nb\n", [" a", "-b", "+c"], "a\nc\n"),
+        ("x\nend\nx\nend\n", [" x", "-end", "+END", "*** End of File"], "x\nend\nx\nEND\n"),
+        ("import os\n\ndef main():\n    pass\n", ["@@ import os", "+import sys"], "import os\nimport sys\n\ndef main():\n    pass\n"),
+        ("a\nb\nc\n", ["@@ a", "+inserted", "@@", "-b", "+B"], "a\ninserted\nB\nc\n"),
+        ("a\n", ["+b"], "a\nb\n"),
+        ("a\nb", [" a", "-b", "+c"], "a\nc\n"),
+    ],
+    ids=["after-context", "several-chunks", "trailing-whitespace", "end-of-file", "insert-after-context",
+         "insert-before-change", "insert-appends", "trailing-newline"],
+)
+def test_apply_chunks(original, body, expected):
+    assert apply_chunks(original, chunks(*body), "f") == expected
 
 
-def test_apply_missing_context_fails():
-    with pytest.raises(PatchError, match="failed to find context"):
-        apply_chunks("a\n", chunks("@@ nowhere", "-a", "+b"), "f")
-
-
-def test_apply_missing_lines_fails():
-    with pytest.raises(PatchError, match="failed to find expected lines"):
-        apply_chunks("a\n", chunks("-zzz", "+b"), "f")
+@pytest.mark.parametrize(
+    "body, message",
+    [(["@@ nowhere", "-a", "+b"], "failed to find context"), (["-zzz", "+b"], "failed to find expected lines")],
+)
+def test_apply_fails_when_the_text_is_not_found(body, message):
+    with pytest.raises(PatchError, match=message):
+        apply_chunks("a\n", chunks(*body), "f")
 
 
 def test_plan_move_to_same_path_is_a_modification(tmp_path):
     (tmp_path / "same.txt").write_text("a\n")
     changes = planner(tmp_path).plan(parse_patch(patch("*** Update File: same.txt", "*** Move to: same.txt", "-a", "+b")))
     assert [(c.path.name, c.contents, c.label) for c in changes] == [("same.txt", "b\n", "M")]
+    tmp = tmp_path / "later"
+    tmp.mkdir()
+    assert planner(tmp).plan(parse_patch(patch("*** Add File: tmp.txt", "+x", "*** Delete File: tmp.txt"))) == []
 
 
 def test_plan_move_to_other_path(tmp_path):
@@ -180,11 +164,6 @@ def test_plan_later_hunk_sees_earlier_hunk(tmp_path):
     assert len(changes) == 1 and changes[0].contents == "A\nB\n"
 
 
-def test_plan_add_then_delete_leaves_nothing_to_do(tmp_path):
-    changes = planner(tmp_path).plan(parse_patch(patch("*** Add File: tmp.txt", "+x", "*** Delete File: tmp.txt")))
-    assert changes == []
-
-
 def test_plan_errors(tmp_path):
     tool = planner(tmp_path)
     with pytest.raises(PatchError, match="no such file"):
@@ -196,17 +175,24 @@ def test_plan_errors(tmp_path):
         tool.plan(parse_patch(patch("*** Update File: latin1.txt", "-x", "+y")))
 
 
-@needs_posix
-def test_write_all_applies_every_change(tmp_path):
-    (tmp_path / "gone.txt").write_text("x\n")
-    _write_all(
-        [
-            FileChange(tmp_path / "deep" / "new.txt", "new\n", "A"),
-            FileChange(tmp_path / "gone.txt", None, "D"),
-        ]
-    )
-    assert (tmp_path / "deep" / "new.txt").read_text() == "new\n"
-    assert not (tmp_path / "gone.txt").exists()
+@pytest.mark.parametrize(
+    "body",
+    [
+        ["*** Update File: secrets/key.txt", "-a", "+b"],
+        ["*** Update File: secrets/key.txt", "*** Move to: moved.txt"],
+        ["*** Update File: ok.txt", "*** Move to: secrets/moved.txt"],
+        ["*** Delete File: secrets/key.txt"],
+        ["*** Add File: secrets/new.txt", "+x"],
+    ],
+)
+def test_plan_rejects_paths_the_policy_cannot_read(tmp_path, body):
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "key.txt").write_text("a\n")
+    (tmp_path / "ok.txt").write_text("a\n")
+    tool = planner(tmp_path, deny_read=(tmp_path / "secrets",))
+    text = patch("*** Update File: ok.txt", "-a", "+b", *body)
+    with pytest.raises(PatchError, match="cannot read secrets/"):
+        tool.plan(parse_patch(text))
 
 
 @needs_posix
@@ -216,7 +202,7 @@ def test_write_all_restores_files_after_a_failure(tmp_path):
     (tmp_path / "gone.txt").chmod(0o750)
     (tmp_path / "blocker").write_text("a file, not a directory\n")
     with pytest.raises(OSError):
-        _write_all(
+        write_all(
             [
                 FileChange(tmp_path / "keep.txt", "new\n", "M"),
                 FileChange(tmp_path / "gone.txt", None, "D"),
@@ -235,6 +221,7 @@ class SwappingOrchestrator:
 
     def __init__(self, swap):
         self.swap = swap
+        self.sandbox = SandboxPolicy.for_session(SandboxMode.FULL_ACCESS, Path.cwd())
         self.requests: list[PatchRequest] = []
 
     def decide_patch(self, request: PatchRequest) -> PatchDecision:

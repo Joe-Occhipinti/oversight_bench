@@ -5,7 +5,7 @@ from __future__ import annotations
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from meltzer.approval.policy import (
     ApprovalChoice,
@@ -16,8 +16,14 @@ from meltzer.approval.policy import (
     ReviewerKind,
     ReviewVerdict,
 )
-from meltzer.approval.rules import RuleDecision, RuleSet
+from meltzer.approval.rules import RuleDecision, RuleMatch, RuleSet
 from meltzer.sandbox.policy import SandboxPolicy
+
+from meltzer.telemetry.events import SOURCE_AUTOMATED_REVIEWER, SOURCE_CONFIG, SOURCE_USER
+
+if TYPE_CHECKING:
+    from meltzer.hooks import HookRunner
+    from meltzer.telemetry.events import SessionTelemetry
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,8 @@ class Decision:
     # not run at all.
     sandboxed: bool
     reason: str
+    # The reviewer approved for the rest of the session, not only this time.
+    for_session: bool = False
 
     @classmethod
     def in_sandbox(cls, reason: str) -> Decision:
@@ -121,6 +129,8 @@ class UserReviewer:
 
     def review(self, request: ApprovalRequest) -> ReviewVerdict:
         choice = self._ask(request)
+        if choice == ApprovalChoice.APPROVE_FOR_SESSION:
+            return ReviewVerdict(approved=True, rationale="approved by user for the session", for_session=True)
         if choice == ApprovalChoice.ALWAYS_ALLOW_PREFIX and request.suggested_prefix:
             return ReviewVerdict(
                 approved=True,
@@ -151,11 +161,16 @@ class ApprovalOrchestrator:
         sandbox: SandboxPolicy,
         reviewer: Reviewer,
         rules: RuleSet,
+        hooks: HookRunner | None = None,
     ):
         self.settings = settings
         self.sandbox = sandbox
         self.reviewer = reviewer
         self.rules = rules
+        # PermissionRequest hooks run before the reviewer.
+        self.hooks = hooks
+        # Records a tool decision event for each request that goes to review.
+        self.telemetry: SessionTelemetry | None = None
 
     def decide_command(self, request: CommandRequest) -> Decision:
         match = self.rules.evaluate(request.command)
@@ -165,6 +180,8 @@ class ApprovalOrchestrator:
             if rule.justification:
                 reason += f": {rule.justification}"
             return Decision.rejected(reason)
+        if match is not None and match.decision == RuleDecision.PROMPT:
+            return self._review_prompted(request, match)
         if match is not None and match.decision == RuleDecision.ALLOW:
             return Decision.unsandboxed(f"allowed by rule {match.describe()}")
         if not self.sandbox.is_sandboxed:
@@ -183,8 +200,30 @@ class ApprovalOrchestrator:
         )
         return self._review(approval)
 
+    def _review_prompted(self, request: CommandRequest, match: RuleMatch) -> Decision:
+        """Review a command that a prompt rule matched; it runs in the sandbox unless escalation was asked."""
+        approval = ApprovalRequest(
+            tool=request.tool,
+            cwd=request.cwd,
+            command=request.command,
+            justification=request.justification,
+            escalate=request.escalate,
+            background=request.background,
+            tty=request.tty,
+        )
+        decision = self._review(approval)
+        rule = match.rules[0]
+        note = f"review required by rule {rule.describe()}"
+        if rule.justification:
+            note += f": {rule.justification}"
+        if not decision.run:
+            return Decision.rejected(f"{decision.reason}; {note}")
+        if request.escalate or not self.sandbox.is_sandboxed:
+            return Decision.unsandboxed(f"{decision.reason}; {note}")
+        return Decision.in_sandbox(f"{decision.reason}; {note}")
+
     def decide_mcp_call(self, request: McpCallRequest) -> Decision:
-        """Whether an MCP tool call runs. The tool itself runs in its server, outside the sandbox."""
+        """Whether an MCP tool call runs."""
         if not request.needs_review:
             return Decision.unsandboxed(f"{request.server}/{request.tool} runs without review")
         approval = ApprovalRequest(
@@ -240,17 +279,29 @@ class ApprovalOrchestrator:
 
     def _review(self, approval: ApprovalRequest) -> Decision:
         if self.settings.policy == ApprovalPolicy.NEVER:
+            self._record_decision(approval.tool, approved=False, source=SOURCE_CONFIG)
             return Decision.rejected(
                 "escalation is disabled (approval_policy = never); only sandboxed actions "
                 "and commands allowed by prefix rules can run"
             )
+        if self.hooks is not None:
+            check = self.hooks.permission_request(approval)
+            if check.decision == "deny":
+                self._record_decision(approval.tool, approved=False, source=SOURCE_CONFIG)
+                return Decision.rejected(f"denied by a PermissionRequest hook: {check.reason}")
         verdict = self.reviewer.review(approval)
+        source = SOURCE_AUTOMATED_REVIEWER if self.settings.reviewer == ReviewerKind.MONITOR else SOURCE_USER
+        self._record_decision(approval.tool, approved=verdict.approved, source=source, for_session=verdict.for_session)
         if verdict.approved:
             reason = verdict.rationale or "approved"
             if verdict.remember_prefix:
                 reason += self._remember(verdict.remember_prefix)
-            return Decision.unsandboxed(reason)
+            return Decision(run=True, sandboxed=False, reason=reason, for_session=verdict.for_session)
         return Decision.rejected(verdict.rationale or "denied")
+
+    def _record_decision(self, tool: str, *, approved: bool, source: str, for_session: bool = False) -> None:
+        if self.telemetry is not None:
+            self.telemetry.tool_decision(tool, approved=approved, source=source, for_session=for_session)
 
     def _remember(self, prefix: tuple[str, ...]) -> str:
         try:

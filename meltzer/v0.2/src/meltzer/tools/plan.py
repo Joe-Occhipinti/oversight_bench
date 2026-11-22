@@ -7,7 +7,7 @@ from enum import StrEnum
 from typing import Any, Callable
 
 from meltzer.history import History, Item, Kind, Role, SessionRecorder
-from meltzer.tools.registry import ToolError, ToolSpec
+from meltzer.tools.registry import Tool, ToolError, ToolSpec
 
 
 class StepStatus(StrEnum):
@@ -172,7 +172,7 @@ UPDATE_PLAN_SPEC = ToolSpec(
 )
 
 
-class UpdatePlanTool:
+class UpdatePlanTool(Tool):
     spec = UPDATE_PLAN_SPEC
 
     def __init__(self, plan: TaskPlan, after_tool_calls: Callable[[Callable[[], None]], None]):

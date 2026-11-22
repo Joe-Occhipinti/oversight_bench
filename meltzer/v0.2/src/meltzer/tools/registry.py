@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Iterable, Protocol
+from pathlib import Path
+from typing import Any, Iterable
 
 
 class ToolError(Exception):
@@ -28,10 +29,17 @@ class ToolSpec:
         }
 
 
-class Tool(Protocol):
+class Tool:
+    """Base of the tools a model can call: a spec and a `run` method."""
+
     spec: ToolSpec
 
-    def run(self, arguments: dict[str, Any]) -> str: ...
+    def run(self, arguments: dict[str, Any]) -> str:
+        raise NotImplementedError
+
+    def hook_input(self, arguments: str) -> str | None:
+        """The raw arguments PreToolUse hooks receive for a call, or None when hooks do not see the call."""
+        return arguments
 
 
 @dataclass(frozen=True)
@@ -50,6 +58,11 @@ class ToolRegistry:
         if tool.spec.name in self._tools:
             raise ValueError(f"tool {tool.spec.name!r} is already registered")
         self._tools[tool.spec.name] = tool
+
+    def hook_input(self, name: str, arguments: str) -> str | None:
+        """What PreToolUse hooks receive for a call of tool `name`, or None when no hook runs."""
+        tool = self._tools.get(name)
+        return arguments if tool is None else tool.hook_input(arguments)
 
     def specs(self) -> list[dict[str, Any]]:
         return [tool.spec.to_wire() for tool in self._tools.values()]
@@ -95,3 +108,32 @@ def optional_bool(arguments: dict[str, Any], key: str) -> bool:
     if not isinstance(value, bool):
         raise ToolError(f"'{key}' must be true or false")
     return value
+
+
+def optional_int(arguments: dict[str, Any], key: str, *, positive: bool = False) -> int | None:
+    value = arguments.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, int) or isinstance(value, bool) or value < (1 if positive else 0):
+        kind = "a positive" if positive else "a non-negative"
+        raise ToolError(f"'{key}' must be {kind} integer")
+    return value
+
+
+def require_int(arguments: dict[str, Any], key: str) -> int:
+    value = arguments.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ToolError(f"'{key}' must be an integer")
+    return value
+
+
+def resolve_workdir(root: Path, value: str | None) -> Path:
+    """The directory a command runs in: `value` (absolute, or relative to `root`), or `root`."""
+    if not value:
+        return root
+    path = Path(value)
+    if not path.is_absolute():
+        path = root / path
+    if not path.is_dir():
+        raise ToolError(f"workdir does not exist or is not a directory: {path}")
+    return path

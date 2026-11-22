@@ -6,21 +6,30 @@ from dataclasses import dataclass
 from typing import Iterable, Sequence
 
 from meltzer.history import Item, Kind, Role
+from meltzer.realtime.bridge import VOICE_SOURCE
+from meltzer.utils.truncate import truncate_output
 
 NO_ENTRIES = "<no retained transcript entries>"
+TOOL_ENTRY_CHARS = 4_000
+
+USER_LABEL = "user"
+VOICE_LABEL = "user (voice)"
+USER_SHELL_LABEL = "user shell command"
+# Entries with these labels are kept in every window.
+USER_LABELS = (USER_LABEL, VOICE_LABEL)
 
 
 @dataclass(frozen=True)
 class TranscriptEntry:
     number: int  # 1-based position in the full history
-    # "user", "assistant", "tool <name> call", "tool <name> result", "hook",
-    # "agent message from <id>"
+    # "user", "user (voice)", "user shell command", "assistant", "tool <name> call",
+    # "tool <name> result", "hook"
     label: str
     text: str
 
     @property
     def is_user(self) -> bool:
-        return self.label == "user"
+        return self.label in USER_LABELS
 
     def render(self) -> str:
         return f"[{self.number}] {self.label}: {self.text}"
@@ -29,30 +38,25 @@ class TranscriptEntry:
 # Labels of context items. None: the item describes the session and is not part
 # of the transcript.
 CONTEXT_LABELS: dict[Kind, str | None] = {
-    Kind.REASONING: None,
-    Kind.AGENTS_MD: None,
     Kind.ENVIRONMENT: None,
     Kind.SKILL: None,
     Kind.HOOK_CONTEXT: None,
-    Kind.SUBAGENT_NOTIFICATION: None,
-    Kind.MEMORY: None,
     Kind.HOOK_PROMPT: "hook",
 }
 
-AGENT_SOURCE_PREFIX = "agent:"
-
 
 def _entry(number: int, item: Item) -> TranscriptEntry | None:
+    if item.kind in (Kind.REASONING, Kind.AGENTS_MD):
+        return None
     if item.kind in CONTEXT_LABELS:
         label = CONTEXT_LABELS[item.kind]
         if label is None:
             return None
         text = item.content
-    elif item.kind == Kind.AGENT_MESSAGE:
-        sender = (item.source or "").removeprefix(AGENT_SOURCE_PREFIX) or "another agent"
-        label, text = f"agent message from {sender}", item.content
+    elif item.kind == Kind.USER_SHELL_COMMAND:
+        label, text = USER_SHELL_LABEL, item.content
     elif item.role == Role.USER:
-        label, text = "user", item.content
+        label, text = (VOICE_LABEL if item.source == VOICE_SOURCE else USER_LABEL), item.content
     elif item.kind == Kind.MESSAGE:
         label, text = "assistant", item.content
     elif item.kind == Kind.TOOL_CALL:
@@ -63,6 +67,8 @@ def _entry(number: int, item: Item) -> TranscriptEntry | None:
         return None
     if not text.strip():
         return None
+    if item.kind in (Kind.TOOL_CALL, Kind.TOOL_RESULT):
+        text = truncate_output(text, TOOL_ENTRY_CHARS)
     return TranscriptEntry(number, label, text)
 
 

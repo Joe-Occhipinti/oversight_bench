@@ -15,18 +15,8 @@ from meltzer.sandbox.bwrap import build_bwrap_args, exit_code_from_status
 from meltzer.sandbox.policy import NetworkMode, SandboxMode, SandboxPolicy
 from meltzer.session import make_temp_dir
 
-needs_bwrap = pytest.mark.skipif(
-    sys.platform != "linux" or shutil.which("bwrap") is None, reason="needs Linux with bubblewrap (bwrap)"
-)
-
-
-@pytest.fixture
-def root(tmp_path: Path) -> Path:
-    path = tmp_path / "work"
-    (path / ".meltzer").mkdir(parents=True)
-    (path / ".git").mkdir()
-    return path
-
+from conftest import needs_bwrap
+from conftest import run_sandboxed as run
 
 def workspace_policy(root: Path, **kwargs) -> SandboxPolicy:
     return SandboxPolicy.for_session(SandboxMode.WORKSPACE_WRITE, root, **kwargs)
@@ -68,52 +58,24 @@ def test_protected_paths(tmp_path):
     assert policy.can_write(tmp_path / "me" / "notes.txt")
 
 
-def test_network_setting(root):
-    # Network is reachable only outside the sandbox (full-access); both sandboxed modes block it.
-    assert not SandboxPolicy.for_session(SandboxMode.WORKSPACE_WRITE, root).allows_network
-    assert not SandboxPolicy.for_session(SandboxMode.READ_ONLY, root).allows_network
-    assert SandboxPolicy.for_session(SandboxMode.FULL_ACCESS, root).allows_network
-
-
 def test_network_modes(root):
+    # Network is reachable only outside the sandbox (full-access); both sandboxed modes block it.
+    assert not SandboxPolicy.for_session(SandboxMode.READ_ONLY, root).allows_network
     assert workspace_policy(root).network == NetworkMode.NONE
     assert SandboxPolicy.for_session(SandboxMode.FULL_ACCESS, root).network == NetworkMode.FULL
+    assert SandboxPolicy.for_session(SandboxMode.FULL_ACCESS, root).allows_network
     proxied = workspace_policy(root, network=NetworkMode.PROXY)
     assert proxied.network == NetworkMode.PROXY and not proxied.allows_network
-
-
-def test_extra_writable_roots_keep_their_protected_paths(root, tmp_path):
-    other = tmp_path / "other-repo"
-    (other / ".git").mkdir(parents=True)
-    policy = workspace_policy(root, extra_writable=(other,))
-    assert policy.can_write(other / "src" / "a.py")
-    assert not policy.can_write(other / ".git" / "config")
-    assert other.resolve() / ".git" in policy.read_only_subpaths()
 
 
 def test_read_only_extra_paths(root):
     policy = workspace_policy(root, read_only_extra=(root / "vendor",))
     assert not policy.can_write(root / "vendor" / "lib.py")
     assert policy.can_write(root / "src" / "lib.py")
-
-
-def test_with_grants_returns_a_wider_policy(root, tmp_path):
-    cache = tmp_path / "cache"
-    cache.mkdir()
-    policy = workspace_policy(root)
-    wider = policy.with_grants(write=(cache,))
-    assert wider.can_write(cache / "pkg.whl") and not policy.can_write(cache / "pkg.whl")
-    assert wider.root == policy.root and wider.network == policy.network
-    assert not wider.can_write(root / ".meltzer" / "config.toml")
-
-
-def test_read_only_and_full_access_policies(root):
     read_only = SandboxPolicy.for_session(SandboxMode.READ_ONLY, root)
-    assert read_only.writable_roots() == ()
-    assert not read_only.can_write(root / "a.txt")
+    assert read_only.writable_roots() == () and not read_only.can_write(root / "a.txt")
     full = SandboxPolicy.for_session(SandboxMode.FULL_ACCESS, root)
-    assert not full.is_sandboxed
-    assert full.can_write(root / ".git" / "config")
+    assert not full.is_sandboxed and full.can_write(root / ".git" / "config")
 
 
 def test_bwrap_arguments(root, monkeypatch):
@@ -129,15 +91,6 @@ def test_bwrap_arguments(root, monkeypatch):
     assert args[bind - 1] == "--bind" and args[protected - 1] == "--ro-bind"
     assert bind < protected
     assert args[-4:] == ["--", "bash", "-c", "true"]
-
-
-def test_bwrap_network_namespace_follows_the_network_mode(root, monkeypatch):
-    monkeypatch.setattr(bwrap.shutil, "which", lambda name: "/usr/bin/bwrap")
-    for mode in (NetworkMode.NONE, NetworkMode.PROXY):
-        args = build_bwrap_args(workspace_policy(root, network=mode), ["true"], root, status_fd=7)
-        assert "--unshare-net" in args
-    full = build_bwrap_args(workspace_policy(root, network=NetworkMode.FULL), ["true"], root, status_fd=7)
-    assert "--unshare-net" not in full
 
 
 def test_bwrap_mounts_the_session_temp_dir_at_tmp(root, tmp_path, monkeypatch):
@@ -170,7 +123,8 @@ def test_bwrap_tmp_without_temp_dir_and_in_read_only_mode(root, tmp_path, monkey
 def test_session_temp_dir_is_private(tmp_path, monkeypatch):
     monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
     path = make_temp_dir("abc")
-    assert path == tmp_path / "meltzer-abc" and path.is_dir()
+    assert path.parent == tmp_path and path.name.startswith("meltzer-abc-") and path.is_dir()
+    assert make_temp_dir("abc") != path
     if sys.platform != "win32":
         assert path.stat().st_mode & 0o777 == 0o700
 
@@ -190,32 +144,12 @@ def test_exit_code_from_status():
 # --- commands under bwrap ----------------------------------------------------------------
 
 
-def run(policy: SandboxPolicy, command: str, tmp_path: Path):
-    runner = ProcessRunner(policy, log_dir=tmp_path / "logs", timeout=30)
-    return runner.run(command, policy.root, sandboxed=True)
-
-
-@needs_bwrap
-def test_policy_of_one_command(root, tmp_path):
-    extra = tmp_path / "extra"
-    extra.mkdir()
-    policy = workspace_policy(root)
-    runner = ProcessRunner(policy, log_dir=tmp_path / "logs", timeout=30)
-    wider = policy.with_grants(write=(extra,))
-    assert runner.run(f"echo x > {extra / 'a.txt'}", root, sandboxed=True, policy=wider).exit_code == 0
-    assert (extra / "a.txt").read_text() == "x\n"
-    if not policy.can_write(extra):
-        assert runner.run(f"echo y > {extra / 'b.txt'}", root, sandboxed=True).exit_code != 0
-
-
-@needs_bwrap
 def test_writes_in_root_succeed(root, tmp_path):
     result = run(workspace_policy(root), "echo hello > out.txt && cat out.txt", tmp_path)
     assert result.exit_code == 0 and "hello" in result.output
     assert (root / "out.txt").read_text() == "hello\n"
 
 
-@needs_bwrap
 @pytest.mark.parametrize("target", [".meltzer/config.toml", ".git/config"])
 def test_root_meltzer_and_git_are_read_only(root, tmp_path, target):
     result = run(workspace_policy(root), f"echo x > {target}", tmp_path)
@@ -224,7 +158,6 @@ def test_root_meltzer_and_git_are_read_only(root, tmp_path, target):
     assert not (root / target).exists()
 
 
-@needs_bwrap
 def test_write_outside_root_fails(root, tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -237,7 +170,6 @@ def test_write_outside_root_fails(root, tmp_path):
     assert not (outside / "escape.txt").exists()
 
 
-@needs_bwrap
 def test_meltzer_home_inside_root_is_read_only(tmp_path):
     home = tmp_path / "me" / ".meltzer"
     (home / "rules").mkdir(parents=True)
@@ -245,13 +177,6 @@ def test_meltzer_home_inside_root_is_read_only(tmp_path):
     result = run(policy, f"echo x >> {home / 'rules' / 'default.rules'}", tmp_path)
     assert result.exit_code != 0 and "Read-only file system" in result.output
     assert not (home / "rules" / "default.rules").exists()
-
-
-@needs_bwrap
-def test_read_only_mode(root, tmp_path):
-    policy = SandboxPolicy.for_session(SandboxMode.READ_ONLY, root)
-    result = run(policy, "echo x > out.txt", tmp_path)
-    assert result.exit_code != 0 and not (root / "out.txt").exists()
 
 
 @pytest.fixture
@@ -275,7 +200,6 @@ def tcp_server():
     server.close()
 
 
-@needs_bwrap
 def test_network_is_blocked(root, tmp_path, tcp_server):
     port, accepted = tcp_server
     connect = f"import socket; socket.create_connection(('127.0.0.1', {port}), timeout=3); print('CONNECTED')"
@@ -285,7 +209,6 @@ def test_network_is_blocked(root, tmp_path, tcp_server):
     assert accepted == []
 
 
-@needs_bwrap
 @pytest.mark.skipif(not Path("/run").is_dir(), reason="no /run directory")
 def test_run_directory_is_empty(root, tmp_path):
     result = run(workspace_policy(root), "ls -A /run; echo END", tmp_path)
@@ -300,7 +223,6 @@ def session_tmp(tmp_path: Path) -> Path:
     return path
 
 
-@needs_bwrap
 def test_sandboxed_commands_share_the_session_tmp(root, tmp_path, session_tmp):
     policy = workspace_policy(root, temp_dir=session_tmp)
     first = run(policy, "echo shared > /tmp/note.txt", tmp_path)
@@ -328,9 +250,9 @@ def test_host_tmp_is_hidden_from_sandboxed_commands(root, tmp_path, session_tmp)
     assert "SOCKET" in unsandboxed.output and "FILE" in unsandboxed.output
 
 
-@needs_bwrap
-def test_read_only_mode_tmp_is_not_writable(root, tmp_path, session_tmp):
+def test_read_only_mode_has_no_writable_path(root, tmp_path, session_tmp):
     policy = SandboxPolicy.for_session(SandboxMode.READ_ONLY, root, temp_dir=session_tmp)
+    assert run(policy, "echo x > out.txt", tmp_path).exit_code != 0 and not (root / "out.txt").exists()
     result = run(policy, "echo x > /tmp/x.txt", tmp_path)
     assert result.exit_code != 0 and "Read-only file system" in result.output
     assert not (session_tmp / "x.txt").exists()

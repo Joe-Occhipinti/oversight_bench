@@ -137,6 +137,10 @@ KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("monitor.model", "monitor_model", None, _string),
     # Transcript length of approval reviews.
     ConfigKey("monitor.transcript_items", "monitor_transcript_items", 40, _positive_int),
+    # Description of this machine, added to the environment profile of approval reviews.
+    ConfigKey("monitor.environment", "monitor_environment", None, _string, user_only=True),
+    # Hosts that approval reviews treat as services of the user's organization.
+    ConfigKey("monitor.trusted_hosts", "monitor_trusted_hosts", (), _string_tuple, user_only=True),
     # Interactive processes: longest wait, in milliseconds, for output of a running process.
     ConfigKey(
         "background_terminal_max_timeout", "background_terminal_max_timeout",
@@ -155,11 +159,11 @@ KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("network.enabled", "network_enabled", False, _bool),
     ConfigKey("network.allowed_domains", "network_allowed_domains", (), _string_tuple, merge=True),
     ConfigKey("network.denied_domains", "network_denied_domains", (), _string_tuple, merge=True),
-    ConfigKey("network.allow_local_binding", "network_allow_local_binding", False, _bool),
+    ConfigKey("network.allow_local_binding", "network_allow_local_binding", False, _bool, user_only=True),
     # Web search.
-    ConfigKey("web_search.enabled", "web_search_enabled", False, _bool),
+    ConfigKey("web_search.enabled", "web_search_enabled", False, _bool, user_only=True),
     ConfigKey("web_search.endpoint", "web_search_endpoint", None, _string, user_only=True),
-    ConfigKey("web_search.api_key_env", "web_search_api_key_env", None, _string),
+    ConfigKey("web_search.api_key_env", "web_search_api_key_env", None, _string, user_only=True),
     # Skills.
     ConfigKey("skills.include_instructions", "skills_include_instructions", True, _bool),
     ConfigKey("skills.config", "skills_config", (), _table_list, user_only=True),
@@ -167,10 +171,10 @@ KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("plugins", "plugins", {}, _table, merge_entries=True, user_only=True),
     ConfigKey("marketplaces", "marketplaces", {}, _table, merge_entries=True, user_only=True),
     # Memories from earlier sessions.
-    ConfigKey("memories.generate", "memories_generate", False, _bool),
-    ConfigKey("memories.use", "memories_use", False, _bool),
-    ConfigKey("memories.extract_model", "memories_extract_model", None, _string),
-    ConfigKey("memories.max_bytes", "memories_max_bytes", DEFAULT_MEMORIES_MAX_BYTES, _positive_int),
+    ConfigKey("memories.generate", "memories_generate", False, _bool, user_only=True),
+    ConfigKey("memories.use", "memories_use", False, _bool, user_only=True),
+    ConfigKey("memories.extract_model", "memories_extract_model", None, _string, user_only=True),
+    ConfigKey("memories.max_bytes", "memories_max_bytes", DEFAULT_MEMORIES_MAX_BYTES, _positive_int, user_only=True),
     # Context window of the model, in tokens; unset when unknown.
     ConfigKey("model_context_window", "model_context_window", None, _positive_int),
     # Full-screen terminal interface for interactive sessions.
@@ -180,11 +184,12 @@ KEYS: tuple[ConfigKey, ...] = (
     ConfigKey("realtime.model", "realtime_model", None, _string),
     ConfigKey("realtime.voice", "realtime_voice", None, _string),
     # Image generation.
-    ConfigKey("image_generation.model", "image_generation_model", None, _string),
+    ConfigKey("image_generation.model", "image_generation_model", None, _string, user_only=True),
     # Telemetry.
     ConfigKey("otel", "otel", {}, _table, user_only=True),
-    ConfigKey("analytics.enabled", "analytics_enabled", False, _bool),
-    ConfigKey("feedback.enabled", "feedback_enabled", False, _bool),
+    ConfigKey("analytics.enabled", "analytics_enabled", False, _bool, user_only=True),
+    ConfigKey("feedback.enabled", "feedback_enabled", False, _bool, user_only=True),
+    ConfigKey("feedback.endpoint", "feedback_endpoint", None, _string, user_only=True),
 )
 
 KEYS_BY_NAME: dict[str, ConfigKey] = {key.name: key for key in KEYS}
@@ -214,6 +219,8 @@ class Config:
     hooks_stop: tuple[HookDefinition, ...]
     monitor_model: str | None
     monitor_transcript_items: int
+    monitor_environment: str | None
+    monitor_trusted_hosts: tuple[str, ...]
     background_terminal_max_timeout: int
     agents_max_depth: int
     agents_max_threads: int
@@ -245,6 +252,7 @@ class Config:
     otel: dict[str, Any]
     analytics_enabled: bool
     feedback_enabled: bool
+    feedback_endpoint: str | None
     # Where each value came from: key name -> "default", "command line", or a file path.
     sources: dict[str, str] = field(default_factory=dict, compare=False)
     warnings: tuple[str, ...] = field(default=(), compare=False)
@@ -257,11 +265,37 @@ class Config:
 
     def summary(self) -> dict[str, Any]:
         """Effective values keyed by config name, for logs and session records."""
-        return {key.name: _plain(getattr(self, key.attr)) for key in KEYS}
+        values = {key.name: _plain(getattr(self, key.attr)) for key in KEYS}
+        if "mcp_servers" in values:
+            values["mcp_servers"] = _redact_mcp_env(values["mcp_servers"])
+        values["otel"] = _redact_otel_headers(values["otel"])
+        return values
 
     def hook_definitions(self) -> tuple[HookDefinition, ...]:
         """All configured hooks, in event order."""
         return tuple(hook for event in HOOK_EVENTS for hook in getattr(self, HOOK_ATTRS[event]))
+
+
+def _redact_mcp_env(servers: Any) -> Any:
+    """The `mcp_servers` table with the values of each entry's `env` table replaced by "<redacted>"."""
+    if not isinstance(servers, dict):
+        return servers
+    redacted = {}
+    for name, entry in servers.items():
+        if isinstance(entry, dict) and isinstance(entry.get("env"), dict):
+            entry = {**entry, "env": {key: "<redacted>" for key in entry["env"]}}
+        redacted[name] = entry
+    return redacted
+
+
+def _redact_otel_headers(otel: Any) -> Any:
+    """The `otel` table with the values of the exporter's `headers` table replaced by "<redacted>"."""
+    exporter = otel.get("exporter") if isinstance(otel, dict) else None
+    entry = exporter.get("otlp-http") if isinstance(exporter, dict) else None
+    if not isinstance(entry, dict) or not isinstance(entry.get("headers"), dict):
+        return otel
+    headers = {key: "<redacted>" for key in entry["headers"]}
+    return {**otel, "exporter": {**exporter, "otlp-http": {**entry, "headers": headers}}}
 
 
 def _plain(value: Any) -> Any:

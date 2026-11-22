@@ -13,10 +13,10 @@
     *** End Patch
 
 Paths are relative to the workspace root, or absolute. The patch is applied
-by meltzer itself, not by a sandboxed process, so every target path is
-checked against the sandbox policy before anything is written, and written
-without following symbolic links. A patch is applied as a whole: if one file
-cannot be written, the others are restored.
+by meltzer itself, not by a sandboxed process. Every target path is checked
+against the sandbox policy before anything is written, and written without
+following symbolic links. A patch is applied as a whole: if one file cannot be
+written, the others are restored.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from typing import Any
 
 from meltzer.approval.orchestrator import ApprovalOrchestrator, PatchRequest
 from meltzer.sandbox.policy import resolve
-from meltzer.tools.registry import ToolError, ToolSpec, require_string
+from meltzer.tools.registry import Tool, ToolError, ToolSpec, require_string
 
 BEGIN_PATCH = "*** Begin Patch"
 END_PATCH = "*** End Patch"
@@ -237,7 +237,7 @@ def _directory_flags() -> int:
 
 
 def _file_flags(extra: int) -> int:
-    # O_NONBLOCK: opening a FIFO must not wait for the other end.
+    # Files are opened without waiting for the other end of a FIFO.
     return extra | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
 
@@ -351,7 +351,7 @@ def _remove_directory(directory: Path) -> None:
         os.close(parent)
 
 
-def _write_all(changes: list[FileChange]) -> None:
+def write_all(changes: list[FileChange]) -> None:
     """Apply every change, or none: on a write error, earlier changes are undone.
 
     Paths are opened one component at a time without following symbolic
@@ -377,7 +377,7 @@ def _write_all(changes: list[FileChange]) -> None:
         raise
 
 
-class ApplyPatchTool:
+class ApplyPatchTool(Tool):
     spec = ToolSpec(
         name="apply_patch",
         description=(
@@ -441,6 +441,12 @@ class ApplyPatchTool:
             return FileChange(path, contents, "M" if path.is_file() or exists(path) else "A")
 
         for hunk in hunks:
+            named = [hunk.path, hunk.move_to] if isinstance(hunk, UpdateFile) and hunk.move_to else [hunk.path]
+            for name in named:
+                if not self.orchestrator.sandbox.can_read(self._path(name)):
+                    raise PatchError(f"cannot read {name}")
+
+        for hunk in hunks:
             path = self._path(hunk.path)
             if isinstance(hunk, AddFile):
                 staged[path] = written(path, hunk.contents)
@@ -471,7 +477,7 @@ class ApplyPatchTool:
             raise ToolError(f"patch not applied: {decision.reason}")
 
         try:
-            _write_all(changes)
+            write_all(changes)
         except OSError as exc:
             target = exc.filename or "a file"
             raise ToolError(f"patch not applied: failed to write {target}: {exc.strerror}") from exc
