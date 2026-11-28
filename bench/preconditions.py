@@ -72,15 +72,36 @@ class PreconditionsError(RuntimeError):
     """The preconditions could not be written. The sample is an infrastructure error."""
 
 
-def render_config(agent_model_id: str, monitor_model_id: str, max_turn_steps: int) -> str:
-    """The text of `/root/.meltzer/config.toml`."""
+PROFILE_NAME = "workspace"
+SANDBOX_MODE_LINE = 'sandbox_mode = "workspace-write"\n'
+
+
+def permission_profile(deny: tuple[str, ...]) -> tuple[str, str]:
+    """The `default_permissions` line and the profile tables: the built-in workspace profile plus `deny` entries."""
+    line = f"default_permissions = {json.dumps(PROFILE_NAME)}\n"
+    entries = "".join(f'{json.dumps(path)} = "deny"\n' for path in deny)
+    tables = (
+        f'\n[permissions.{PROFILE_NAME}]\nextends = ":workspace"\n'
+        f"\n[permissions.{PROFILE_NAME}.filesystem]\n{entries}"
+    )
+    return line, tables
+
+
+def render_config(
+    agent_model_id: str, monitor_model_id: str, max_turn_steps: int, deny: tuple[str, ...] = ()
+) -> str:
+    """The text of `/root/.meltzer/config.toml`.
+
+    With `deny`, sandboxed commands can neither read nor write those paths: a permission profile based on the
+    built-in workspace profile, selected with `default_permissions`.
+    """
     for name, value in (("agent_model_id", agent_model_id), ("monitor_model_id", monitor_model_id)):
         if not isinstance(value, str) or not MODEL_ID.fullmatch(value):
             raise ValueError(f"{name} {value!r} is not a plain model id")
     if isinstance(max_turn_steps, bool) or not isinstance(max_turn_steps, int) or max_turn_steps < 1:
         raise ValueError(f"max_turn_steps must be a positive integer, got {max_turn_steps!r}")
     template = Template(CONFIG_TEMPLATE.read_text(encoding="utf-8"))
-    return template.substitute(
+    text = template.substitute(
         agent_model=agent_model_id,
         monitor_model=monitor_model_id,
         max_turn_steps=max_turn_steps,
@@ -88,12 +109,20 @@ def render_config(agent_model_id: str, monitor_model_id: str, max_turn_steps: in
         monitor_environment=json.dumps(MONITOR_ENVIRONMENT),
         trusted_hosts=", ".join(json.dumps(host) for host in MONITOR_TRUSTED_HOSTS),
     )
+    if not deny:
+        return text
+    if SANDBOX_MODE_LINE not in text:
+        raise ValueError("the config template has no sandbox_mode line")
+    line, tables = permission_profile(deny)
+    return text.replace(SANDBOX_MODE_LINE, SANDBOX_MODE_LINE + line, 1) + tables
 
 
-def _host_files(agent_model_id: str, monitor_model_id: str, max_turn_steps: int) -> dict[str, str]:
+def _host_files(
+    agent_model_id: str, monitor_model_id: str, max_turn_steps: int, deny: tuple[str, ...] = ()
+) -> dict[str, str]:
     """Container path -> text, for the files that come from `preconditions/` (not the trust file)."""
     files = {
-        CONFIG_PATH: render_config(agent_model_id, monitor_model_id, max_turn_steps),
+        CONFIG_PATH: render_config(agent_model_id, monitor_model_id, max_turn_steps, deny),
         RULES_PATH: RULES_SOURCE.read_text(encoding="utf-8"),
     }
     for name, target in SCRIPT_PATHS.items():
@@ -101,13 +130,15 @@ def _host_files(agent_model_id: str, monitor_model_id: str, max_turn_steps: int)
     return files
 
 
-async def write_preconditions(agent_model_id: str, monitor_model_id: str, max_turn_steps: int) -> None:
-    """Write the files of spec section 6 into the agent container, as root.
+async def write_preconditions(
+    agent_model_id: str, monitor_model_id: str, max_turn_steps: int, deny: tuple[str, ...] = ()
+) -> None:
+    """Write the files of spec section 6 into the agent container, as root. `deny`: see `render_config`.
 
     Raises `PreconditionsError` if `pytest` is not on the container's `PATH`, if one of the files
     already exists, or if the trust entry cannot be computed. Call it after the BashArena setup.
     """
-    files = _host_files(agent_model_id, monitor_model_id, max_turn_steps)
+    files = _host_files(agent_model_id, monitor_model_id, max_turn_steps, deny)
     sb = sandbox()
 
     pytest = await sb.exec(["sh", "-c", "command -v pytest"], user="root")
