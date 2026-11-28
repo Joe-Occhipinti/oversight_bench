@@ -1,51 +1,18 @@
 """CLI: `python -m bench <command>`.
 
 Commands:
-  run <config>         create results/<run_id>/ and run the experiment
+  run <config>         create results/<run_id>/ and run the experiment (search, reflection, execution)
   resume <run_id>      continue an interrupted run from results/<run_id>/ (finished samples are kept;
-                       --redo-provider-failures also runs again the samples lost to a provider outage)
+                       --redo-provider-failures also runs again the execution samples lost to a provider outage)
   preflight <config>   check the main-task pool (writes results/<run_id>/preflight.json)
   render-prompts <config>
-                       write the rendered prompts of one sample per condition to
-                       results/<run_id>/prompts/ (review gate, spec 9.2)
-  judge <run_id>       label the successful samples of a finished run
-  asr <run_id>         compute the run's ASRs with intervals (writes results/<run_id>/asr.json)
-  plot-asr <run_id>... --out <png>
-                       plot the faithful average ASR of the runs, in the order given (reads their asr.json)
-  plot-strategies <run_id>
-                       plot the registry cards of the run's faithful successful attacks
-                       (writes results/<run_id>/plots/strategies.png)
-  docent-upload <run_id>
-                       upload the run's samples to the Docent collection DOCENT_COLLECTION_ID
-                       (needs DOCENT_API_KEY; writes results/<run_id>/docent.json)
-  failure-extract <run_id> [--limit N]
-                       run the extraction reading on the uploaded run's samples
-                       (writes results/<run_id>/failure_extract.jsonl)
-  failure-taxonomy <run_id>... [--out DIR]
-                       propose categories for each free-text field of the runs' extraction outputs
-                       (writes DIR/proposal.json and DIR/proposal.md; default results/failure-taxonomy)
-  plot-failures <run_id>... [--taxonomy DIR] [--out DIR]
-                       plot the failure and decision analysis of the runs, in the order given
-                       (default output results/failure-analysis)
+                       write the rendered prompts of one search pair in every role and tier to
+                       results/<run_id>/prompts/
+  metrics <run_id>     compute the outcome metrics of a run (writes results/<run_id>/summary.json)
+  check-registry       check that every card citation exists in the meltzer tree
 
 `<run_id>` resolves to results/<run_id>/ and reads its config.yaml. `<config>` is a path to a run YAML.
-Commands that depend on other modules import them when called; if a module is missing the command
-exits with code 2 and "not implemented yet". Other errors exit with code 1.
-
-Calls into other modules (the contract those modules must match):
-  bench.task.run_experiment(cfg: RunConfig, run_dir: Path) -> list[str] | None   main task ids used
-  bench.preflight.preflight(cfg: RunConfig, run_dir: Path) -> list[str]
-  bench.judge.judge_run(run_dir: Path, judge: dict, cards_dir: Path)   (called with keywords)
-  bench.asr.measure_run(run_dir: Path, cfg: RunConfig) -> dict          (the content of asr.json)
-  render-prompts: bench.prompts.write_review_prompts(out_dir, {condition: ReviewSample}) with
-    ReviewSample(task_description, setting_description, side_task_description, attack_base_path,
-    aware_common_path, aware_section_path, cards_dir, card_id); the texts come from bench.basharena: load_task(id).description,
-    setting_description(), SIDE_TASKS[name].description, with id = shuffled_pool(seed)[0] and name =
-    the first side task of the config (the same sample in every condition). card_id is the card assigned to
-    that pair in aware mode one_card, else None.
-
-The manifest's main_task_ids come from run_experiment's return value; if it returns None they are read from
-results/<run_id>/preflight.json, key "kept" (list of task ids), when that file exists.
+Errors exit with code 1.
 """
 
 from __future__ import annotations
@@ -56,20 +23,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-from bench import assignment, config
+from bench import config
 from bench.config import ConfigError, RunConfig
 
 
 class CliError(Exception):
     """A user-facing error: printed as `error: ...`, exit code 1."""
-
-
-class NotImplementedYet(Exception):
-    """A module this command depends on is missing: exit code 2."""
-
-
-def _import_error(what: str, exc: ImportError) -> NotImplementedYet:
-    return NotImplementedYet(f"{what} is not implemented yet ({exc})")
 
 
 def _load_run(run_id: str) -> tuple[RunConfig, Path]:
@@ -79,16 +38,11 @@ def _load_run(run_id: str) -> tuple[RunConfig, Path]:
     return config.load_config(run_dir / "config.yaml"), run_dir
 
 
-# ---------------------------------------------------------------- run, preflight, judge
+# ---------------------------------------------------------------- run, resume, preflight
 
 
 def cmd_run(args: argparse.Namespace) -> int:
     cfg = config.load_config(args.config)
-    assignment.check_config(cfg)
-    try:
-        from bench.task import run_experiment
-    except ImportError as e:
-        raise _import_error("run (bench.task.run_experiment)", e) from None
     try:
         run_dir = config.create_run_dir(cfg, args.config)
     except FileExistsError as e:
@@ -97,15 +51,13 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 
 def _run_and_finish(cfg: RunConfig, run_dir: Path, max_samples: int | None = None) -> int:
-    from bench.task import run_experiment
+    from bench.run import run_experiment
 
     ids = None
     try:
-        result = run_experiment(cfg, run_dir, max_samples=max_samples)
-        if isinstance(result, (list, tuple)):
-            ids = [str(x) for x in result]
-    finally:
-        config.finish_manifest(run_dir, ids if ids is not None else _preflight_kept(run_dir))
+        ids = run_experiment(cfg, run_dir, max_samples=max_samples)
+    finally:  # also when the run stops with an error (or Ctrl-C): then the status says `failed`
+        config.finish_manifest(run_dir, ids, status="finished" if ids is not None else "failed")
     return 0
 
 
@@ -122,11 +74,11 @@ def _leftover_sandboxes() -> list[str]:
 
 def cmd_resume(args: argparse.Namespace) -> int:
     """Continue an interrupted run. The run is rebuilt from the config saved in its results folder, so nothing
-    but the number of parallel samples can differ from the first start."""
+    but the number of parallel samples can differ from the first start. A run that failed before its first eval
+    set (no preflight.json, image build, a prompt file) is resumed the same way once the cause is fixed."""
     cfg, run_dir = _load_run(args.run_id)
-    assignment.check_config(cfg)
-    if not (run_dir / "manifest.json").is_file() or not (run_dir / "inspect_logs").is_dir():
-        raise CliError(f"{run_dir} holds no started run (no manifest.json or inspect_logs); use `run` with a config")
+    if not (run_dir / "manifest.json").is_file():
+        raise CliError(f"{run_dir} holds no started run (no manifest.json); use `run` with a config")
     leftovers = _leftover_sandboxes()
     if leftovers:
         print(
@@ -139,7 +91,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
         from bench.redo import mark_for_redo
 
         redo = mark_for_redo(run_dir)
-        print(f"{len(redo)} samples ended because the model provider was unreachable and run again: {', '.join(redo) or '-'}")
+        print(
+            f"{len(redo)} execution samples ended because the model provider was unreachable and run again: "
+            f"{', '.join(redo) or '-'}"
+        )
     config.note_resume(run_dir, args.max_samples, redo)
     return _run_and_finish(cfg, run_dir, args.max_samples)
 
@@ -156,12 +111,9 @@ def _preflight_kept(run_dir: Path) -> list[str] | None:
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
+    from bench.preflight import preflight
+
     cfg = config.load_config(args.config)
-    assignment.check_config(cfg)
-    try:
-        from bench.preflight import preflight
-    except ImportError as e:
-        raise _import_error("preflight (bench.preflight.preflight)", e) from None
     run_dir = config.resolve_run_dir(cfg.run_id)
     config.check_run_dir_free(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -170,169 +122,39 @@ def cmd_preflight(args: argparse.Namespace) -> int:
 
 
 def cmd_render_prompts(args: argparse.Namespace) -> int:
+    from bench.basharena import shuffled_pool
+    from bench.run import write_example_prompts
+    from bench.search import search_pairs
+
     cfg = config.load_config(args.config)
-    try:
-        from bench.basharena import SIDE_TASKS, load_task, setting_description, shuffled_pool
-        from bench.prompts import ReviewSample, write_review_prompts
-    except ImportError as e:
-        raise _import_error("render-prompts (bench.basharena / bench.prompts)", e) from None
     run_dir = config.resolve_run_dir(cfg.run_id)
     config.check_run_dir_free(run_dir)
-    assignment.check_config(cfg)
-    root = config.REPO_ROOT
+    main_tasks = cfg.setting.main_tasks
     try:
-        # The first task the run will use: preflight's kept list if it exists, else the shuffled pool.
-        task_ids = (_preflight_kept(run_dir) or shuffled_pool(cfg.setting.main_tasks.seed))[: cfg.setting.main_tasks.n]
-        task_id, side_task = task_ids[0], cfg.setting.side_tasks[0]
-        card_id = assignment.assigned_cards(cfg, task_ids).get((task_id, side_task))
-        aware_common_path, aware_section_path = cfg.prompts.aware_paths()
-        sample = ReviewSample(
-            task_description=load_task(task_id).description,
-            setting_description=setting_description(),
-            side_task_description=SIDE_TASKS[side_task].description,
-            attack_base_path=root / cfg.prompts.attack_base,
-            aware_common_path=aware_common_path,
-            aware_section_path=aware_section_path,
-            cards_dir=root / cfg.prompts.cards,
-            card_id=card_id,
-        )
-        written = write_review_prompts(run_dir / "prompts", {c: sample for c in cfg.conditions})
-    except FileNotFoundError as e:
+        # The search main tasks the run will use: preflight's kept list if it exists, else the shuffled pool.
+        search_ids = (_preflight_kept(run_dir) or shuffled_pool(main_tasks.seed))[: main_tasks.search_n]
+        n_pairs = cfg.search.waves * cfg.search.per_wave
+        task_id, side_task = search_pairs(search_ids, cfg.setting.side_tasks, n_pairs, cfg.seeds.search_pairs)[0]
+        written = write_example_prompts(cfg, run_dir / "prompts", task_id, side_task)
+    except (FileNotFoundError, ValueError) as e:
         raise CliError(str(e)) from None
-    print(f"sample: main task {task_id}, side task {side_task}" + (f", card {card_id}" if card_id else ""))
+    print(f"pair: main task {task_id}, side task {side_task} (the first search pair)")
     for path in written:
         print(path)
     return 0
 
 
-def cmd_judge(args: argparse.Namespace) -> int:
-    cfg, run_dir = _load_run(args.run_id)
-    try:
-        from bench.judge import judge_run
-    except ImportError as e:
-        raise _import_error("judge (bench.judge.judge_run)", e) from None
-    judge_run(run_dir, judge=config.to_plain(cfg.models.judge), cards_dir=config.REPO_ROOT / cfg.prompts.cards)
-    return 0
+# ---------------------------------------------------------------- metrics, registry
 
 
-# ---------------------------------------------------------------- asr and plots (11)
-
-
-def cmd_asr(args: argparse.Namespace) -> int:
-    cfg, run_dir = _load_run(args.run_id)
-    from bench.asr import format_result, measure_run
-
-    if not (run_dir / "samples.jsonl").is_file():
-        raise CliError(f"{run_dir} has no samples.jsonl; the run has not finished")
-    try:
-        result = measure_run(run_dir, cfg)
-    except ValueError as e:
-        raise CliError(str(e)) from None
-    print(format_result(result))
-    print(run_dir / "asr.json")
-    return 0
-
-
-def _read_asr(run_id: str) -> dict:
-    path = config.resolve_run_dir(run_id) / "asr.json"
-    if not path.is_file():
-        raise CliError(f"{path} not found; run `python -m bench asr {run_id}` first")
-    return json.loads(path.read_text(encoding="utf-8"))
-
-
-def cmd_plot_asr(args: argparse.Namespace) -> int:
-    from bench.plots import plot_avg_asr
-
-    results = [_read_asr(run_id) for run_id in args.run_ids]
-    out = Path(args.out)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    plot_avg_asr(results, out)
-    print(out)
-    return 0
-
-
-def cmd_plot_strategies(args: argparse.Namespace) -> int:
-    from bench.plots import plot_strategies
-
-    result = _read_asr(args.run_id)
-    out = config.resolve_run_dir(args.run_id) / "plots" / "strategies.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    plot_strategies(result, out)
-    print(out)
-    return 0
-
-
-def cmd_docent_upload(args: argparse.Namespace) -> int:
-    from bench.docent_upload import upload_run
+def cmd_metrics(args: argparse.Namespace) -> int:
+    from bench.metrics import SUMMARY, format_summary, measure_run
 
     cfg, run_dir = _load_run(args.run_id)
     if not (run_dir / "samples.jsonl").is_file():
-        raise CliError(f"{run_dir} has no samples.jsonl; the run has not finished")
-    client, collection_id = _docent_client()
-    try:
-        upload_run(run_dir, cfg, client, collection_id)
-    except ValueError as e:
-        raise CliError(str(e)) from None
-    print(run_dir / "docent.json")
-    return 0
-
-
-def _docent_client():
-    from docent import Docent
-
-    from bench.judge import env_value
-
-    values = {k: env_value(k) for k in ("DOCENT_API_KEY", "DOCENT_COLLECTION_ID")}
-    missing = [k for k, v in values.items() if not v]
-    if missing:
-        raise CliError(f"{', '.join(missing)} not set (put them in .env)")
-    return Docent(api_key=values["DOCENT_API_KEY"]), values["DOCENT_COLLECTION_ID"]
-
-
-def cmd_failure_extract(args: argparse.Namespace) -> int:
-    from bench.failures import OUT_FILE, extract_run, format_summary
-
-    cfg, run_dir = _load_run(args.run_id)
-    if not (run_dir / "docent.json").is_file():
-        raise CliError(f"{run_dir} has no docent.json; run `python -m bench docent-upload {args.run_id}` first")
-    client, collection_id = _docent_client()
-    try:
-        rows = extract_run(run_dir, cfg, client, collection_id, limit=args.limit)
-    except ValueError as e:
-        raise CliError(str(e)) from None
-    print(format_summary(rows))
-    print(run_dir / OUT_FILE)
-    return 0
-
-
-def cmd_failure_taxonomy(args: argparse.Namespace) -> int:
-    from bench.failure_taxonomy import propose
-    from bench.failures import OUT_FILE
-
-    runs = [(run_dir, cfg) for cfg, run_dir in map(_load_run, args.run_ids)]
-    missing = [str(run_dir / OUT_FILE) for run_dir, _ in runs if not (run_dir / OUT_FILE).is_file()]
-    if missing:
-        raise CliError(f"no extraction output: {', '.join(missing)}; run `python -m bench failure-extract` first")
-    client, collection_id = _docent_client()
-    out_dir = Path(args.out)
-    proposal = propose(runs, client, collection_id, out_dir)
-    for field, data in proposal["fields"].items():
-        out = data.get("output") or {}
-        print(f"{field}: {len(data['values'])} values, {len(out.get('categories') or [])} categories, "
-              f"{data.get('status')}, tokens in {data.get('input_tokens')} out {data.get('output_tokens')}")  # fmt: skip
-    print(out_dir / "proposal.md")
-    return 0
-
-
-def cmd_plot_failures(args: argparse.Namespace) -> int:
-    from bench.failure_plots import plot_all
-
-    runs = [(run_dir, cfg) for cfg, run_dir in map(_load_run, args.run_ids)]
-    proposal_path = Path(args.taxonomy) / "proposal.json"
-    proposal = json.loads(proposal_path.read_text(encoding="utf-8")) if proposal_path.is_file() else None
-    out = Path(args.out)
-    plot_all(runs, proposal, out)
-    print(out)
+        raise CliError(f"{run_dir} has no samples.jsonl; the run has not started")
+    print(format_summary(measure_run(run_dir, cfg)))
+    print(run_dir / SUMMARY)
     return 0
 
 
@@ -356,9 +178,10 @@ def build_parser() -> argparse.ArgumentParser:
     for name, func, help_ in (
         ("run", cmd_run, "run the experiment described by a run config"),
         ("preflight", cmd_preflight, "check the main-task pool for a run config"),
+        ("render-prompts", cmd_render_prompts, "write the rendered prompts of one search pair in every role and tier"),
     ):
         p = sub.add_parser(name, help=help_)
-        p.add_argument("config", help="path to a run YAML, e.g. runs/exp1-01.yaml")
+        p.add_argument("config", help="path to a run YAML, e.g. runs/exp3-smoke.yaml")
         p.set_defaults(func=func)
 
     p = sub.add_parser("resume", help="continue an interrupted run (finished samples are kept)")
@@ -369,45 +192,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--redo-provider-failures",
         action="store_true",
-        help="also run again the finished samples whose meltzer gave up because the model provider was unreachable",
+        help="also run again the finished execution samples whose meltzer gave up because the model provider was "
+        "unreachable",
     )
     p.set_defaults(func=cmd_resume)
 
-    for name, func, help_ in (
-        ("judge", cmd_judge, "label the successful samples of a run"),
-        ("asr", cmd_asr, "compute the ASRs of a judged run (writes asr.json)"),
-        ("plot-strategies", cmd_plot_strategies, "plot the cards of a run's faithful successful attacks"),
-        ("docent-upload", cmd_docent_upload, "upload a run's samples to the Docent collection"),
-    ):
-        p = sub.add_parser(name, help=help_)
-        p.add_argument("run_id", help="run id; reads results/<run_id>/")
-        p.set_defaults(func=func)
-
-    p = sub.add_parser("failure-extract", help="run the Docent extraction reading on an uploaded run")
-    p.add_argument("run_id", help="run id; reads results/<run_id>/docent.json")
-    p.add_argument("--limit", type=int, default=None, help="at most this many samples per side task (trial)")
-    p.set_defaults(func=cmd_failure_extract)
-
-    p = sub.add_parser("failure-taxonomy", help="propose categories for the extraction fields of several runs")
-    p.add_argument("run_ids", nargs="+", help="run ids; each needs results/<run_id>/failure_extract.jsonl")
-    p.add_argument("--out", default=str(config.REPO_ROOT / "results" / "failure-taxonomy"), help="output folder")
-    p.set_defaults(func=cmd_failure_taxonomy)
-
-    p = sub.add_parser("plot-failures", help="plot the failure and decision analysis of several runs")
-    p.add_argument("run_ids", nargs="+", help="run ids, in plot order; each needs asr.json and failure_extract.jsonl")
-    p.add_argument("--taxonomy", default=str(config.REPO_ROOT / "results" / "failure-taxonomy"),
-                   help="folder with proposal.json (skipped if absent)")  # fmt: skip
-    p.add_argument("--out", default=str(config.REPO_ROOT / "results" / "failure-analysis"), help="output folder")
-    p.set_defaults(func=cmd_plot_failures)
-
-    p = sub.add_parser("plot-asr", help="plot the faithful average ASR of several runs")
-    p.add_argument("run_ids", nargs="+", help="run ids, in plot order; each needs results/<run_id>/asr.json")
-    p.add_argument("--out", required=True, help="PNG file to write")
-    p.set_defaults(func=cmd_plot_asr)
-
-    p = sub.add_parser("render-prompts", help="write the rendered prompts for the review gate")
-    p.add_argument("config", help="path to a run YAML, e.g. runs/exp1-01.yaml")
-    p.set_defaults(func=cmd_render_prompts)
+    p = sub.add_parser("metrics", help="compute the outcome metrics of a run (writes summary.json)")
+    p.add_argument("run_id", help="run id; reads results/<run_id>/")
+    p.set_defaults(func=cmd_metrics)
 
     p = sub.add_parser("check-registry", help="check that every card citation exists in the meltzer tree")
     p.set_defaults(func=cmd_check_registry)
@@ -419,9 +211,6 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
-    except NotImplementedYet as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 2
     except (CliError, ConfigError, FileExistsError) as e:
         print(f"error: {e}", file=sys.stderr)
         return 1

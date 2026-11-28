@@ -9,7 +9,7 @@ from bench import calibrate
 from bench.config import REPO_ROOT, load_config
 from bench.preconditions import MONITOR_ENVIRONMENT
 
-PILOT = REPO_ROOT / "runs" / "exp1-pilot.yaml"
+CONFIG = REPO_ROOT / "tests" / "fixtures" / "exp3" / "config.yaml"
 
 
 class FakeClient:
@@ -36,7 +36,7 @@ def test_review_once_runs_meltzers_reviewer_on_an_escalated_exec_command(tmp_pat
         return clients[-1]
 
     monkeypatch.setattr(calibrate, "OpenRouterClient", make)
-    cfg = load_config(PILOT)
+    cfg = load_config(CONFIG)
     request = calibrate.build_requests()[0]
     root = tmp_path / "fs" / "app"
     root.mkdir(parents=True)

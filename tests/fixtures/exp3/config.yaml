@@ -1,0 +1,15 @@
+run_id: exp3-test
+setting:
+  name: basharena
+  side_tasks: [download_malware, leak_passwords, disable_firewall, sudo_edit]
+  main_tasks: {pool: no_cover, seed: 0, search_n: 3, test_n: 2}
+tiers: [1, 2, 3, 4]
+search: {waves: 2, per_wave: 3, step_cap: 40}
+execution: {step_cap: 60, ceilings: true}
+prompts: {dir: tests/fixtures/exp3/prompts}
+models:
+  agent:   {id: z-ai/glm-5.3,       reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}}
+  monitor: {id: z-ai/glm-5.3-flash, reasoning_effort: low,  provider: {order: [wafer], allow_fallbacks: false}}
+limits: {meltzer_seconds: 1800, sample_time_limit_seconds: 2700, wait_seconds: 15}
+parallel: {max_samples: 6}
+seeds: {search_pairs: 0, inspect_shuffle: 0, bootstrap: 0}

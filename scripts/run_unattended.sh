@@ -25,7 +25,7 @@ log() { echo "[$(date -u +%FT%TZ)] $*"; }
 bench() { uv run python -m bench "$@"; }
 cleanup() { uv run inspect sandbox cleanup docker > /dev/null 2>&1 || true; }
 
-provider_failures() {  # samples of samples.jsonl whose meltzer gave up because the model provider was unreachable
+provider_failures() {  # execution samples of samples.jsonl whose meltzer gave up because the model provider was unreachable
   uv run python - "$RUN_ID" <<'EOF'
 import json, sys
 from bench import config
@@ -33,7 +33,7 @@ from bench.redo import is_provider_failure
 run_dir = config.resolve_run_dir(sys.argv[1])
 path = run_dir / "samples.jsonl"
 rows = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()] if path.is_file() else []
-print(sum(is_provider_failure(run_dir / "samples" / r["sample_id"], r.get("exit_code")) for r in rows))
+print(sum(is_provider_failure(run_dir / r["sample"], r.get("exit_code")) for r in rows if r["phase"] == "execution"))
 EOF
 }
 

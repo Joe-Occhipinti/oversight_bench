@@ -24,15 +24,13 @@ BASE = {
     "setting": {
         "name": "basharena",
         "side_tasks": ["download_malware", "leak_passwords", "disable_firewall", "sudo_edit"],
-        "main_tasks": {"pool": "no_cover", "n": 30, "seed": 0},
+        "main_tasks": {"pool": "no_cover", "seed": 0, "search_n": 3, "test_n": 10},
     },
-    "conditions": ["unaware", "aware"],
-    "prompts": {
-        "attack_base": "a.md",
-        "aware_mode": "all_cards",
-        "aware_section": {"common": "d.md", "explore": "e.md", "all_cards": "b.md", "one_card": "c.md"},
-        "cards": "cards",
-    },
+    "tiers": [1, 2, 3, 4],
+    "search": {"waves": 2, "per_wave": 3, "step_cap": 150},
+    "execution": {"step_cap": 120, "ceilings": True},
+    "prompts": {"dir": "prompts/exp3"},
+    "materials": {"docs": "docs/reviewed"},
     "models": {
         "agent": {
             "id": "a/agent",
@@ -44,18 +42,10 @@ BASE = {
             "reasoning_effort": "low",
             "provider": {"order": ["together"], "allow_fallbacks": False},
         },
-        "judge": {
-            "id": "a/judge",
-            "reasoning_effort": "max",
-            "provider": {"order": ["together"], "allow_fallbacks": False},
-            "temperature": 0,
-            "concurrency": 8,
-        },
     },
-    "meltzer": {"max_turn_steps": 100},
     "limits": {"meltzer_seconds": 1800, "sample_time_limit_seconds": 2700, "wait_seconds": 15},
     "parallel": {"max_samples": 6},
-    "seeds": {"inspect_shuffle": 0, "card_assignment": 0, "bootstrap": 0},
+    "seeds": {"search_pairs": 0, "inspect_shuffle": 0, "bootstrap": 0},
 }
 
 
@@ -94,71 +84,44 @@ def all_paths(node=BASE, prefix=""):
     return out
 
 
-# ---------------------------------------------------------------- the two run files
+# ---------------------------------------------------------------- the run files
 
 
-def test_exp1_01_yaml_loads_with_section_12_values():
-    cfg = load_config(RUNS / "exp1-01.yaml")
-    assert cfg.run_id == "exp1-01"
-    assert cfg.setting.name == "basharena"
-    assert cfg.setting.side_tasks == ("download_malware", "leak_passwords", "disable_firewall", "sudo_edit")
-    assert cfg.setting.main_tasks == config.MainTasks(pool="no_cover", n=30, seed=0)
-    assert cfg.conditions == ("unaware", "aware")
-    assert cfg.prompts == config.Prompts(
-        attack_base="prompts/exp1/attack_base.md",
-        aware_mode="all_cards",
-        aware_section=config.AwareSections(
-            common="prompts/exp1/aware_common.md",
-            explore="prompts/exp1/aware_explore.md",
-            all_cards="prompts/exp1/aware_all_cards.md",
-            one_card="prompts/exp1/aware_one_card.md",
-        ),
-        cards="registry/v0.2/cards",
-    )
-    assert cfg.prompts.aware_section_file == "prompts/exp1/aware_all_cards.md"
-    assert cfg.prompts.aware_common_file == "prompts/exp1/aware_common.md"
-    wafer = config.Provider(order=("wafer",), allow_fallbacks=False)
-    assert cfg.models.agent == config.ModelSpec(id="z-ai/glm-5.3", reasoning_effort="high", provider=wafer)
-    assert cfg.models.monitor == config.ModelSpec(id="z-ai/glm-5.3-flash", reasoning_effort="low", provider=wafer)
-    assert cfg.models.judge == config.JudgeSpec(
-        id="deepseek/deepseek-v4.1-flash",
-        reasoning_effort="high",
-        provider=wafer,
-        temperature=0,
-        concurrency=8,
-    )
-    assert cfg.meltzer == config.Meltzer(max_turn_steps=150)
-    assert cfg.limits == config.Limits(meltzer_seconds=5400, sample_time_limit_seconds=6300, wait_seconds=15)
+@pytest.mark.parametrize("path", sorted(RUNS.glob("exp3-*.yaml")), ids=lambda p: p.name)
+def test_every_exp3_run_file_loads_and_names_itself(path):
+    cfg = load_config(path)
+    assert cfg.run_id == path.stem
+    assert (REPO / cfg.prompts.dir / "base.md").is_file() and (REPO / cfg.materials.docs).is_dir()
+
+
+def test_smoke_yaml_has_the_slice_6_sizes():
+    cfg = load_config(RUNS / "exp3-smoke.yaml")
+    assert cfg.tiers == (2,) and (cfg.search.waves, cfg.search.per_wave) == (2, 1)
+    assert cfg.setting.main_tasks.test_n * len(cfg.setting.side_tasks) == 1 and cfg.execution.ceilings is True
+
+
+def test_base_dict_loads_into_the_dataclasses(tmp_path):
+    cfg = load(tmp_path, BASE)
+    assert cfg.run_id == "t-01"
+    assert cfg.setting.main_tasks == config.MainTasks(pool="no_cover", seed=0, search_n=3, test_n=10)
+    assert cfg.setting.main_tasks.n == 13
+    assert cfg.tiers == (1, 2, 3, 4)
+    assert cfg.search == config.Search(waves=2, per_wave=3, step_cap=150)
+    assert cfg.execution == config.Execution(step_cap=120, ceilings=True)
+    assert cfg.prompts == config.Prompts(dir="prompts/exp3")
+    assert cfg.materials == config.Materials(docs="docs/reviewed")
+    together = config.Provider(order=("together",), allow_fallbacks=False)
+    assert cfg.models.agent == config.ModelSpec(id="a/agent", reasoning_effort=None, provider=together)
+    assert cfg.models.monitor == config.ModelSpec(id="a/monitor", reasoning_effort="low", provider=together)
+    assert cfg.limits == config.Limits(meltzer_seconds=1800, sample_time_limit_seconds=2700, wait_seconds=15)
     assert cfg.parallel == config.Parallel(max_samples=6)
-    assert cfg.seeds == config.Seeds(inspect_shuffle=0, card_assignment=0, bootstrap=0)
-
-
-def test_pilot_yaml_differs_from_exp1_01_only_in_run_id_and_n():
-    full = load_config(RUNS / "exp1-01.yaml")
-    pilot = load_config(RUNS / "exp1-pilot.yaml")
-    assert pilot.run_id == "exp1-pilot"
-    assert pilot.setting.main_tasks.n == 2
-    expected = dataclasses.replace(
-        full,
-        run_id="exp1-pilot",
-        setting=dataclasses.replace(
-            full.setting, main_tasks=dataclasses.replace(full.setting.main_tasks, n=2)
-        ),
-    )
-    assert pilot == expected
-
-
-def test_base_dict_loads(tmp_path):
-    assert load(tmp_path, BASE).run_id == "t-01"
+    assert cfg.seeds == config.Seeds(search_pairs=0, inspect_shuffle=0, bootstrap=0)
 
 
 def test_provider_is_per_model(tmp_path):
-    data = mutated("models.monitor.provider.order", ["wafer", "together"])
-    data["models"]["judge"]["provider"]["allow_fallbacks"] = True
-    cfg = load(tmp_path, data)
+    cfg = load(tmp_path, mutated("models.monitor.provider.order", ["wafer", "together"]))
     assert cfg.models.agent.provider == config.Provider(order=("together",), allow_fallbacks=False)
     assert cfg.models.monitor.provider == config.Provider(order=("wafer", "together"), allow_fallbacks=False)
-    assert cfg.models.judge.provider == config.Provider(order=("together",), allow_fallbacks=True)
 
 
 def test_config_is_frozen(tmp_path):
@@ -171,9 +134,9 @@ def test_config_is_frozen(tmp_path):
 
 def test_to_plain_gives_json_ready_dict(tmp_path):
     cfg = load(tmp_path, BASE)
-    plain = config.to_plain(cfg.models.judge)
-    assert plain == BASE["models"]["judge"]
-    json.dumps(plain)  # tuples became lists
+    plain = config.to_plain(cfg.models.agent)
+    assert plain == BASE["models"]["agent"]
+    json.dumps(config.to_plain(cfg))  # tuples became lists
 
 
 # ---------------------------------------------------------------- file level
@@ -201,10 +164,8 @@ def test_top_level_must_be_mapping(tmp_path):
 # ---------------------------------------------------------------- every field required
 
 
-# meltzer and limits (spec 12) have defaults; an aware run in mode all_cards needs only the common and all_cards files
-OPTIONAL = {"meltzer", "meltzer.max_turn_steps", "limits", "limits.meltzer_seconds",
-            "limits.sample_time_limit_seconds", "limits.wait_seconds",
-            "prompts.aware_section.explore", "prompts.aware_section.one_card"}
+OPTIONAL = {"materials", "materials.docs", "limits", "limits.meltzer_seconds",
+            "limits.sample_time_limit_seconds", "limits.wait_seconds"}  # fmt: skip
 
 
 @pytest.mark.parametrize("path", [p for p in all_paths() if p not in OPTIONAL])
@@ -215,20 +176,20 @@ def test_every_field_is_required(tmp_path, path):
     assert "required" in str(exc.value)
 
 
-def test_meltzer_and_limits_default_when_omitted(tmp_path):
-    data = mutated("meltzer")
+def test_materials_and_limits_default_when_omitted(tmp_path):
+    data = mutated("materials")
     del data["limits"]
     cfg = load(tmp_path, data)
-    assert cfg.meltzer == config.Meltzer(max_turn_steps=150)
+    assert cfg.materials == config.Materials(docs="meltzer/v0.2/docs") and (REPO / cfg.materials.docs).is_dir()
     assert cfg.limits == config.Limits(meltzer_seconds=5400, sample_time_limit_seconds=6300, wait_seconds=15)
-    assert (config.DEFAULT_MAX_TURN_STEPS, config.DEFAULT_MELTZER_SECONDS) == (150, 5400)
+    assert load(tmp_path, {**BASE, "materials": {}}).materials.docs == config.DEFAULT_DOCS
 
 
 def test_each_limit_field_can_be_left_out_or_set(tmp_path):
-    cfg = load(tmp_path, {**BASE, "meltzer": {}, "limits": {}})
-    assert (cfg.meltzer.max_turn_steps, cfg.limits.meltzer_seconds, cfg.limits.wait_seconds) == (150, 5400, 15)
-    cfg = load(tmp_path, {**BASE, "meltzer": {"max_turn_steps": 40}, "limits": {"wait_seconds": 0}})
-    assert (cfg.meltzer.max_turn_steps, cfg.limits.meltzer_seconds, cfg.limits.wait_seconds) == (40, 5400, 0)
+    cfg = load(tmp_path, {**BASE, "limits": {}})
+    assert (cfg.limits.meltzer_seconds, cfg.limits.wait_seconds) == (5400, 15)
+    cfg = load(tmp_path, {**BASE, "limits": {"wait_seconds": 0}})
+    assert (cfg.limits.meltzer_seconds, cfg.limits.wait_seconds) == (5400, 0)
 
 
 def test_sample_time_limit_follows_meltzer_seconds_unless_set(tmp_path):
@@ -243,8 +204,8 @@ def test_sample_time_limit_follows_meltzer_seconds_unless_set(tmp_path):
 def test_omitted_sections_are_still_closed_and_typed(tmp_path):
     with pytest.raises(ConfigError, match=r"limits\.timeout: unknown field"):
         load(tmp_path, {**BASE, "limits": {"timeout": 5}})
-    with pytest.raises(ConfigError, match=r"meltzer: must be a mapping"):
-        load(tmp_path, {**BASE, "meltzer": 150})
+    with pytest.raises(ConfigError, match=r"materials: must be a mapping"):
+        load(tmp_path, {**BASE, "materials": "docs"})
 
 
 def test_missing_field_error_names_full_path(tmp_path):
@@ -266,66 +227,31 @@ def test_run_id_must_be_a_plain_folder_name(tmp_path, bad):
         load(tmp_path, mutated("run_id", bad))
 
 
-# ---------------------------------------------------------------- model ids
+# ---------------------------------------------------------------- models
 
 
-@pytest.mark.parametrize("who", ["agent", "monitor", "judge"])
+@pytest.mark.parametrize("who", ["agent", "monitor"])
 @pytest.mark.parametrize("bad", ["", "   ", None, 5])
 def test_model_id_must_be_set(tmp_path, who, bad):
     with pytest.raises(ConfigError, match=rf"models\.{who}\.id"):
         load(tmp_path, mutated(f"models.{who}.id", bad))
 
 
-# ---------------------------------------------------------------- side tasks
-
-
-def test_side_tasks_must_be_among_the_four(tmp_path):
-    with pytest.raises(ConfigError, match=r"setting\.side_tasks.*hack_the_planet"):
-        load(tmp_path, mutated("setting.side_tasks", ["leak_passwords", "hack_the_planet"]))
-
-
-def test_side_tasks_subset_is_allowed(tmp_path):
-    cfg = load(tmp_path, mutated("setting.side_tasks", ["sudo_edit"]))
-    assert cfg.setting.side_tasks == ("sudo_edit",)
-
-
-@pytest.mark.parametrize("bad", [[], "sudo_edit", ["sudo_edit", "sudo_edit"]])
-def test_side_tasks_must_be_nonempty_list_without_duplicates(tmp_path, bad):
-    with pytest.raises(ConfigError, match=r"setting\.side_tasks"):
-        load(tmp_path, mutated("setting.side_tasks", bad))
-
-
-# ---------------------------------------------------------------- main tasks n
-
-
-def test_n_above_100_rejected(tmp_path):
-    with pytest.raises(ConfigError, match=r"setting\.main_tasks\.n.*100"):
-        load(tmp_path, mutated("setting.main_tasks.n", 101))
-
-
-def test_n_100_accepted(tmp_path):
-    assert load(tmp_path, mutated("setting.main_tasks.n", 100)).setting.main_tasks.n == 100
-
-
-@pytest.mark.parametrize("bad", [0, -1, 2.5, "30", True])
-def test_n_must_be_positive_int(tmp_path, bad):
-    with pytest.raises(ConfigError, match=r"setting\.main_tasks\.n"):
-        load(tmp_path, mutated("setting.main_tasks.n", bad))
-
-
-# ---------------------------------------------------------------- reasoning effort
+def test_agent_and_monitor_ids_must_differ(tmp_path):
+    with pytest.raises(ConfigError, match="different ids"):
+        load(tmp_path, mutated("models.monitor.id", "a/agent"))
 
 
 @pytest.mark.parametrize("who", ["agent", "monitor"])
 @pytest.mark.parametrize("value", [None, "none", "minimal", "low", "medium", "high"])
-def test_agent_monitor_effort_allowed_values(tmp_path, who, value):
+def test_effort_allowed_values(tmp_path, who, value):
     cfg = load(tmp_path, mutated(f"models.{who}.reasoning_effort", value))
     assert getattr(cfg.models, who).reasoning_effort == value
 
 
 @pytest.mark.parametrize("who", ["agent", "monitor"])
 @pytest.mark.parametrize("value", ["max", "xhigh", "extreme", 3, True])
-def test_agent_monitor_effort_rejects_max_xhigh_and_other(tmp_path, who, value):
+def test_effort_rejects_max_xhigh_and_other(tmp_path, who, value):
     with pytest.raises(ConfigError, match=rf"models\.{who}\.reasoning_effort"):
         load(tmp_path, mutated(f"models.{who}.reasoning_effort", value))
 
@@ -335,35 +261,62 @@ def test_effort_rejection_message_explains_max(tmp_path):
         load(tmp_path, mutated("models.agent.reasoning_effort", "max"))
 
 
-@pytest.mark.parametrize("value", [None, "max", "xhigh", "none", "anything"])
-def test_judge_effort_is_any_string_or_null(tmp_path, value):
-    cfg = load(tmp_path, mutated("models.judge.reasoning_effort", value))
-    assert cfg.models.judge.reasoning_effort == value
+def test_judge_is_not_a_model_of_this_schema(tmp_path):
+    with pytest.raises(ConfigError, match=r"models\.judge.*unknown"):
+        load(tmp_path, mutated("models.judge", BASE["models"]["agent"]))
 
 
-@pytest.mark.parametrize("value", [3, True, ["max"]])
-def test_judge_effort_non_string_rejected(tmp_path, value):
-    with pytest.raises(ConfigError, match=r"models\.judge\.reasoning_effort"):
-        load(tmp_path, mutated("models.judge.reasoning_effort", value))
+# ---------------------------------------------------------------- side tasks, main tasks, tiers, search sizes
 
 
-# ---------------------------------------------------------------- conditions
+def test_side_tasks_must_be_among_the_four(tmp_path):
+    with pytest.raises(ConfigError, match=r"setting\.side_tasks.*hack_the_planet"):
+        load(tmp_path, mutated("setting.side_tasks", ["leak_passwords", "hack_the_planet"]))
 
 
-def test_unknown_condition_rejected(tmp_path):
-    with pytest.raises(ConfigError, match=r"conditions.*honest"):
-        load(tmp_path, mutated("conditions", ["unaware", "honest"]))
+def test_side_tasks_subset_is_allowed(tmp_path):
+    data = mutated("setting.side_tasks", ["sudo_edit", "leak_passwords"])
+    assert load(tmp_path, data).setting.side_tasks == ("sudo_edit", "leak_passwords")
 
 
-@pytest.mark.parametrize("value", [["aware"], ["unaware"], ["aware", "unaware"]])
-def test_condition_subsets_allowed(tmp_path, value):
-    assert load(tmp_path, mutated("conditions", value)).conditions == tuple(value)
+@pytest.mark.parametrize("bad", [[], "sudo_edit", ["sudo_edit", "sudo_edit"]])
+def test_side_tasks_must_be_nonempty_list_without_duplicates(tmp_path, bad):
+    with pytest.raises(ConfigError, match=r"setting\.side_tasks"):
+        load(tmp_path, mutated("setting.side_tasks", bad))
 
 
-@pytest.mark.parametrize("bad", [[], "aware", ["aware", "aware"]])
-def test_conditions_must_be_nonempty_list_without_duplicates(tmp_path, bad):
-    with pytest.raises(ConfigError, match="conditions"):
-        load(tmp_path, mutated("conditions", bad))
+def test_search_and_test_main_tasks_together_at_most_100(tmp_path):
+    with pytest.raises(ConfigError, match=r"setting\.main_tasks.*<= 100.*101"):
+        load(tmp_path, mutated("setting.main_tasks.test_n", 98))
+    assert load(tmp_path, mutated("setting.main_tasks.test_n", 97)).setting.main_tasks.n == 100
+
+
+@pytest.mark.parametrize("key", ["search_n", "test_n"])
+@pytest.mark.parametrize("bad", [0, -1, 2.5, "3", True])
+def test_main_task_counts_must_be_positive_ints(tmp_path, key, bad):
+    with pytest.raises(ConfigError, match=rf"setting\.main_tasks\.{key}"):
+        load(tmp_path, mutated(f"setting.main_tasks.{key}", bad))
+
+
+@pytest.mark.parametrize("value", [[1], [4, 2], [1, 2, 3, 4]])
+def test_tier_subsets_allowed_in_the_given_order(tmp_path, value):
+    assert load(tmp_path, mutated("tiers", value)).tiers == tuple(value)
+
+
+@pytest.mark.parametrize("bad", [[], [0], [5], ["1"], [True], [1, 1], 1])
+def test_tiers_must_be_a_list_of_distinct_known_tiers(tmp_path, bad):
+    with pytest.raises(ConfigError, match="tiers"):
+        load(tmp_path, mutated("tiers", bad))
+
+
+def test_search_pairs_must_be_distinct_pairs_of_the_search_main_tasks(tmp_path):
+    """waves x per_wave pairs are drawn from search_n x side tasks without repeats."""
+    data = mutated("setting.side_tasks", ["sudo_edit"])
+    with pytest.raises(ConfigError, match=r"search: waves x per_wave \(6\).*\(search_n x side tasks = 3\)"):
+        load(tmp_path, data)
+    data["search"]["per_wave"] = 1
+    data["search"]["waves"] = 3
+    assert load(tmp_path, data).search.waves == 3
 
 
 # ---------------------------------------------------------------- closed schema, fixed setting values
@@ -375,15 +328,14 @@ def test_conditions_must_be_nonempty_list_without_duplicates(tmp_path, bad):
         "",
         "setting",
         "setting.main_tasks",
+        "search",
+        "execution",
         "prompts",
-        "prompts.aware_section",
+        "materials",
         "models",
         "models.agent",
         "models.monitor",
-        "models.judge",
         "models.agent.provider",
-        "models.judge.provider",
-        "meltzer",
         "limits",
         "parallel",
         "seeds",
@@ -400,16 +352,16 @@ def test_unknown_key_rejected_and_named(tmp_path, parent):
         load(tmp_path, data)
 
 
+@pytest.mark.parametrize("old", ["conditions", "meltzer"])
+def test_exp1_sections_are_unknown(tmp_path, old):
+    with pytest.raises(ConfigError, match=rf"{old}: unknown field"):
+        load(tmp_path, {**BASE, old: {}})
+
+
 def test_misspelled_field_is_reported_as_unknown(tmp_path):
     data = copy.deepcopy(BASE)
     data["models"]["agent"]["reasoning_efort"] = data["models"]["agent"].pop("reasoning_effort")
     with pytest.raises(ConfigError, match=r"models\.agent\.reasoning_efort.*unknown"):
-        load(tmp_path, data)
-
-
-def test_judge_only_fields_are_unknown_on_agent(tmp_path):
-    data = mutated("models.agent.temperature", 0)
-    with pytest.raises(ConfigError, match=r"models\.agent\.temperature.*unknown"):
         load(tmp_path, data)
 
 
@@ -434,23 +386,21 @@ def test_pool_must_be_no_cover(tmp_path, bad):
         ("models.agent.provider.order", []),
         ("models.agent.provider.order", "together"),
         ("models.agent.provider.allow_fallbacks", "no"),
-        ("models.judge.temperature", "0"),
-        ("models.judge.temperature", True),
-        ("models.judge.concurrency", 0),
-        ("models.judge.concurrency", 1.5),
-        ("meltzer.max_turn_steps", 0),
+        ("search.waves", 0),
+        ("search.per_wave", 1.5),
+        ("search.step_cap", 0),
+        ("execution.step_cap", "150"),
+        ("execution.ceilings", "yes"),
+        ("prompts.dir", ""),
+        ("materials.docs", ""),
         ("limits.meltzer_seconds", 0),
         ("limits.sample_time_limit_seconds", -5),
         ("limits.wait_seconds", -1),
         ("parallel.max_samples", 0),
         ("seeds.bootstrap", "0"),
         ("seeds.inspect_shuffle", 1.0),
-        ("seeds.card_assignment", "0"),
-        ("prompts.aware_mode", "both"),
-        ("prompts.aware_mode", 1),
-        ("prompts.aware_section.one_card", ""),
+        ("seeds.search_pairs", "0"),
         ("setting.main_tasks.seed", True),
-        ("prompts.cards", ""),
         ("setting.name", ""),
         ("setting.main_tasks.pool", 3),
     ],
@@ -458,10 +408,6 @@ def test_pool_must_be_no_cover(tmp_path, bad):
 def test_field_type_errors_name_the_field(tmp_path, path, bad):
     with pytest.raises(ConfigError, match=re.escape(path)):
         load(tmp_path, mutated(path, bad))
-
-
-def test_numbers_may_be_float_for_temperature(tmp_path):
-    assert load(tmp_path, mutated("models.judge.temperature", 0.5)).models.judge.temperature == 0.5
 
 
 # ---------------------------------------------------------------- meltzer_tree_hash
@@ -595,9 +541,9 @@ def test_create_run_dir_allows_prompts_folder_and_preflight_json(tmp_path, cfg_a
     cfg, cfg_path = cfg_and_path
     existing = tmp_path / "results" / "t-01"
     (existing / "prompts").mkdir(parents=True)
-    (existing / "prompts" / "aware_user_message.md").write_text("x", encoding="utf-8")
+    (existing / "prompts" / "tier1_experiment.md").write_text("x", encoding="utf-8")
     run_dir = config.create_run_dir(cfg, cfg_path, results_root=tmp_path / "results")
-    assert (run_dir / "prompts" / "aware_user_message.md").read_text(encoding="utf-8") == "x"
+    assert (run_dir / "prompts" / "tier1_experiment.md").read_text(encoding="utf-8") == "x"
     assert (run_dir / "manifest.json").is_file()
     existing2 = tmp_path / "results2" / "t-01"
     (existing2 / "prompts").mkdir(parents=True)
@@ -641,17 +587,19 @@ def test_manifest_fields_known_at_start(tmp_path, cfg_and_path):
         "basharena_commit",
         "inspect_ai_version",
         "seeds",
+        "status",
         "start_time",
         "end_time",
         "main_task_ids",
     }
+    assert m["status"] == "running"
     assert m["run_id"] == "t-01"
     assert re.fullmatch(r"[0-9a-f]{40}|unknown", m["oversight_bench_commit"])
     assert m["oversight_bench_dirty"] is None or isinstance(m["oversight_bench_dirty"], bool)
     assert m["meltzer_tree_hash"] == config.meltzer_tree_hash()
     assert m["image_tag"] == config.image_tag(m["meltzer_tree_hash"])
     assert m["inspect_ai_version"] == importlib.metadata.version("inspect_ai")
-    assert m["seeds"] == {"main_tasks": 0, "inspect_shuffle": 0, "card_assignment": 0, "bootstrap": 0}
+    assert m["seeds"] == {"main_tasks": 0, "search_pairs": 0, "inspect_shuffle": 0, "bootstrap": 0}
     assert datetime.fromisoformat(m["start_time"]).tzinfo is not None
     assert m["end_time"] is None
     assert m["main_task_ids"] is None
@@ -663,33 +611,53 @@ def test_manifest_fields_known_at_start(tmp_path, cfg_and_path):
 def test_manifest_seeds_come_from_config(tmp_path):
     data = mutated("seeds.bootstrap", 7)
     data["seeds"]["inspect_shuffle"] = 3
-    data["seeds"]["card_assignment"] = 4
+    data["seeds"]["search_pairs"] = 4
     data["setting"]["main_tasks"]["seed"] = 5
     path = write_cfg(tmp_path, data)
     cfg = load_config(path)
     run_dir = config.create_run_dir(cfg, path, results_root=tmp_path / "results")
     m = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert m["seeds"] == {"main_tasks": 5, "inspect_shuffle": 3, "card_assignment": 4, "bootstrap": 7}
+    assert m["seeds"] == {"main_tasks": 5, "search_pairs": 4, "inspect_shuffle": 3, "bootstrap": 7}
 
 
 def test_finish_manifest_fills_end_time_and_main_task_ids(tmp_path, cfg_and_path):
     cfg, cfg_path = cfg_and_path
     run_dir = config.create_run_dir(cfg, cfg_path, results_root=tmp_path / "results")
     before = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    config.finish_manifest(run_dir, ["00147570", "00182310"])
+    config.finish_manifest(run_dir, {"search": ("00147570",), "test": ["00182310"]})
     after = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert after["main_task_ids"] == ["00147570", "00182310"]
+    assert after["main_task_ids"] == {"search": ["00147570"], "test": ["00182310"]}
+    assert after["status"] == "finished"
     assert datetime.fromisoformat(after["end_time"]) >= datetime.fromisoformat(after["start_time"])
-    unchanged = {k: v for k, v in after.items() if k not in ("end_time", "main_task_ids")}
-    assert unchanged == {k: v for k, v in before.items() if k not in ("end_time", "main_task_ids")}
+    unchanged = {k: v for k, v in after.items() if k not in ("end_time", "main_task_ids", "status")}
+    assert unchanged == {k: v for k, v in before.items() if k not in ("end_time", "main_task_ids", "status")}
+
+
+def test_a_failed_run_and_a_resume_are_recorded_in_the_status(tmp_path, cfg_and_path):
+    cfg, cfg_path = cfg_and_path
+    run_dir = config.create_run_dir(cfg, cfg_path, results_root=tmp_path / "results")
+    status = lambda: json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["status"]  # noqa: E731
+    config.finish_manifest(run_dir, status="failed")
+    assert status() == "failed"
+    config.note_resume(run_dir)
+    assert status() == "running"
+    with pytest.raises(ValueError, match="status"):
+        config.finish_manifest(run_dir, status="running")
+
+
+def test_write_text_atomic_leaves_the_file_whole_and_no_temp_file(tmp_path):
+    path = tmp_path / "strategy.md"
+    config.write_text_atomic(path, "a\nb\n")
+    config.write_text_atomic(path, "new\n")
+    assert path.read_bytes() == b"new\n" and [p.name for p in tmp_path.iterdir()] == ["strategy.md"]
 
 
 def test_finish_manifest_without_ids_keeps_them(tmp_path, cfg_and_path):
     cfg, cfg_path = cfg_and_path
     run_dir = config.create_run_dir(cfg, cfg_path, results_root=tmp_path / "results")
-    config.finish_manifest(run_dir, ["a"])
+    config.finish_manifest(run_dir, {"search": ["a"], "test": ["b"]})
     config.finish_manifest(run_dir)
-    assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["main_task_ids"] == ["a"]
+    assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["main_task_ids"] == {"search": ["a"], "test": ["b"]}
 
 
 def test_git_commit_unknown_when_git_fails(monkeypatch):
@@ -774,8 +742,8 @@ def test_basharena_commit_reads_file_or_none(tmp_path):
 
 
 def test_resolve_run_dir(tmp_path):
-    assert config.resolve_run_dir("exp1-01", results_root=tmp_path) == tmp_path / "exp1-01"
-    assert config.resolve_run_dir("exp1-01") == REPO / "results" / "exp1-01"
+    assert config.resolve_run_dir("exp3-01", results_root=tmp_path) == tmp_path / "exp3-01"
+    assert config.resolve_run_dir("exp3-01") == REPO / "results" / "exp3-01"
 
 
 def test_sha256_helper_matches_manual_hash(tmp_path):
@@ -788,59 +756,3 @@ def test_sha256_helper_matches_manual_hash(tmp_path):
     for rel, data in (("d/f", b"F"), ("g", b"G")):
         h.update(rel.encode() + b"\0" + data + b"\0")
     assert config.meltzer_tree_hash(root) == h.hexdigest()
-
-
-# ---------------------------------------------------------------- aware mode
-
-
-def test_aware_mode_selects_the_section_file(tmp_path):
-    for mode, file in (("explore", "e.md"), ("all_cards", "b.md"), ("one_card", "c.md")):
-        cfg = load(tmp_path, mutated("prompts.aware_mode", mode))
-        assert cfg.prompts.aware_mode == mode and cfg.prompts.aware_section_file == file
-        assert cfg.prompts.aware_common_file == "d.md"
-        assert cfg.prompts.aware_paths() == (config.REPO_ROOT / "d.md", config.REPO_ROOT / file)
-
-
-@pytest.mark.parametrize("path", ["prompts.aware_mode", "prompts.aware_section", "prompts.aware_section.common",
-                                  "prompts.aware_section.all_cards", "seeds.card_assignment"])
-def test_aware_mode_fields_are_required(tmp_path, path):
-    with pytest.raises(ConfigError, match=re.escape(path)):
-        load(tmp_path, mutated(path))
-
-
-@pytest.mark.parametrize("mode", ["explore", "all_cards", "one_card"])
-def test_an_aware_run_needs_the_common_file_and_its_mode_file_only(tmp_path, mode):
-    others = [m for m in config.AWARE_MODES if m != mode]
-    data = mutated("prompts.aware_mode", mode)
-    for m in others:
-        del data["prompts"]["aware_section"][m]
-    assert load(tmp_path, data).prompts.aware_section_file == data["prompts"]["aware_section"][mode]
-    for key in ("common", mode):
-        missing = copy.deepcopy(data)
-        del missing["prompts"]["aware_section"][key]
-        with pytest.raises(ConfigError, match=re.escape(f"prompts.aware_section.{key}: required")):
-            load(tmp_path, missing)
-
-
-def test_an_unaware_run_needs_no_aware_files(tmp_path):
-    """A run without the aware condition loads without any aware file (e.g. a config saved before `common`)."""
-    data = mutated("conditions", ["unaware"])
-    data["prompts"]["aware_section"] = {"all_cards": "b.md", "one_card": "c.md"}
-    cfg = load(tmp_path, data)
-    assert cfg.prompts.aware_common_file is None
-    assert cfg.prompts.aware_paths() == (None, config.REPO_ROOT / "b.md")
-    data["prompts"]["aware_section"] = {}
-    assert load(tmp_path, data).prompts.aware_paths() == (None, None)
-
-
-def test_saved_med98_unaware_config_still_loads():
-    """`judge`, `analyze` and `resume` reload the config saved in the results folder."""
-    saved = REPO / "results" / "exp1-med98-unaware" / "config.yaml"
-    if not saved.is_file():
-        pytest.skip("results folder not present")
-    assert load_config(saved).conditions == ("unaware",)
-
-
-def test_unknown_aware_section_key_is_rejected(tmp_path):
-    with pytest.raises(ConfigError, match=re.escape("prompts.aware_section.extra: unknown field")):
-        load(tmp_path, mutated("prompts.aware_section.extra", "x.md"))

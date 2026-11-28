@@ -1,4 +1,4 @@
-"""Tests for the CLI (bench.__main__): judge/asr/plot commands, run/preflight, missing modules."""
+"""Tests for the CLI (bench.__main__): run, resume, preflight, render-prompts, metrics, check-registry."""
 
 import json
 import subprocess
@@ -9,35 +9,16 @@ from pathlib import Path
 import pytest
 import yaml
 
-from bench import config
 from bench import __main__ as bench_main
+from bench import config
+from bench import run as bench_run
 from bench.__main__ import main
 from bench.config import load_config
 
 REPO = Path(__file__).resolve().parent.parent
-PILOT = REPO / "runs" / "exp1-pilot.yaml"
-
-
-def make_config(
-    tmp_path, run_id="exp1-pilot", bootstrap=0, agent="a/agent", monitor="a/monitor", name="cfg.yaml", main_seed=0
-):
-    data = yaml.safe_load(PILOT.read_text(encoding="utf-8"))
-    data["run_id"] = run_id
-    data["seeds"]["bootstrap"] = bootstrap
-    data["setting"]["main_tasks"]["seed"] = main_seed
-    data["models"]["agent"]["id"] = agent
-    data["models"]["monitor"]["id"] = monitor
-    path = tmp_path / name
-    path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    return path
-
-
-def make_results_dir(root, run_id, cfg_path=None):
-    d = root / run_id
-    d.mkdir(parents=True)
-    if cfg_path is not None:
-        (d / "config.yaml").write_bytes(Path(cfg_path).read_bytes())
-    return d
+CONFIG = REPO / "tests" / "fixtures" / "exp3" / "config.yaml"
+RUN_ID = "exp3-test"
+IDS = {"search": ["001"], "test": ["002"]}
 
 
 @pytest.fixture
@@ -48,101 +29,11 @@ def results(tmp_path, monkeypatch):
     return root
 
 
-def fake_module(monkeypatch, name, **attrs):
-    mod = types.ModuleType(name)
-    for k, v in attrs.items():
-        setattr(mod, k, v)
-    monkeypatch.setitem(sys.modules, name, mod)
-    return mod
-
-
-def missing_module(monkeypatch, name):
-    monkeypatch.setitem(sys.modules, name, None)  # makes `import name` raise ModuleNotFoundError
-    # `from bench import x` also finds x as an attribute of the package once another test imported it.
-    package, _, attr = name.rpartition(".")
-    if package in sys.modules and sys.modules[package] is not None:
-        monkeypatch.delattr(sys.modules[package], attr, raising=False)
-
-
-# ---------------------------------------------------------------- judge / asr / plot commands
-
-
-def test_judge_dispatch(results, tmp_path, monkeypatch):
-    cfg_path = make_config(tmp_path, "exp1-pilot")
-    cfg = load_config(cfg_path)
-    make_results_dir(results, "exp1-pilot", cfg_path)
-    calls = []
-    fake_module(monkeypatch, "bench.judge", judge_run=lambda *a, **k: calls.append((a, k)))
-
-    assert main(["judge", "exp1-pilot"]) == 0
-
-    assert len(calls) == 1
-    args, kwargs = calls[0]
-    assert args == (results / "exp1-pilot",)
-    assert kwargs["judge"] == config.to_plain(cfg.models.judge)
-    assert kwargs["judge"]["id"] == cfg.models.judge.id
-    assert kwargs["judge"]["provider"] == {"order": ["wafer"], "allow_fallbacks": False}
-    assert kwargs["judge"]["concurrency"] == 8
-    assert kwargs["cards_dir"] == config.CARDS_DIR
-    assert set(kwargs) == {"judge", "cards_dir"}
-
-
-@pytest.mark.parametrize("cmd", ["judge", "asr"])
-def test_unknown_run_id_exits_1(results, capsys, cmd):
-    assert main([cmd, "nope"]) == 1
-    assert "nope" in capsys.readouterr().err
-
-
-def test_judge_exit_2_when_module_missing(results, tmp_path, monkeypatch, capsys):
-    make_results_dir(results, "exp1-pilot", make_config(tmp_path))
-    missing_module(monkeypatch, "bench.judge")
-    assert main(["judge", "exp1-pilot"]) == 2
-    assert "not implemented yet" in capsys.readouterr().err
-
-
-def test_asr_without_samples_jsonl_exits_1(results, tmp_path, capsys):
-    make_results_dir(results, "exp1-pilot", make_config(tmp_path))
-    assert main(["asr", "exp1-pilot"]) == 1
-    assert "samples.jsonl" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("argv", [["plot-asr", "exp1-pilot", "--out", "x.png"], ["plot-strategies", "exp1-pilot"]])
-def test_plots_without_asr_json_point_to_the_asr_command(results, tmp_path, capsys, argv):
-    make_results_dir(results, "exp1-pilot", make_config(tmp_path))
-    assert main(argv) == 1
-    assert "python -m bench asr exp1-pilot" in capsys.readouterr().err
-
-
-def test_plot_asr_requires_out(results):
-    with pytest.raises(SystemExit) as exc:
-        main(["plot-asr", "exp1-pilot"])
-    assert exc.value.code == 2
-
-
-def test_run_dir_with_invalid_config_yaml_exits_1(results, capsys):
-    d = results / "broken"
-    d.mkdir()
-    (d / "config.yaml").write_text("run_id: broken\n", encoding="utf-8")
-    assert main(["judge", "broken"]) == 1
-    assert "setting" in capsys.readouterr().err
+def fake_run(monkeypatch, run_experiment):
+    monkeypatch.setattr(bench_run, "run_experiment", run_experiment)
 
 
 # ---------------------------------------------------------------- run / preflight
-
-
-def test_run_exit_2_when_module_missing_and_no_folder_created(results, monkeypatch, capsys):
-    missing_module(monkeypatch, "bench.task")
-    assert main(["run", str(PILOT)]) == 2
-    err = capsys.readouterr().err
-    assert "not implemented yet" in err
-    assert list(results.iterdir()) == []
-
-
-def test_preflight_exit_2_when_module_missing(results, monkeypatch, capsys):
-    missing_module(monkeypatch, "bench.preflight")
-    assert main(["preflight", str(PILOT)]) == 2
-    assert "not implemented yet" in capsys.readouterr().err
-    assert list(results.iterdir()) == []
 
 
 def test_run_dispatch_creates_folder_and_finishes_manifest(results, monkeypatch):
@@ -152,114 +43,131 @@ def test_run_dispatch_creates_folder_and_finishes_manifest(results, monkeypatch)
         calls.append((cfg, run_dir))
         assert (run_dir / "config.yaml").is_file()
         assert (run_dir / "manifest.json").is_file()
-        return ["001", "002"]
+        return IDS
 
-    fake_module(monkeypatch, "bench.task", run_experiment=run_experiment)
+    fake_run(monkeypatch, run_experiment)
+    assert main(["run", str(CONFIG)]) == 0
 
-    assert main(["run", str(PILOT)]) == 0
-
-    run_dir = results / "exp1-pilot"
-    assert calls == [(load_config(PILOT), run_dir)]
-    assert (run_dir / "config.yaml").read_bytes() == PILOT.read_bytes()
+    run_dir = results / RUN_ID
+    assert calls == [(load_config(CONFIG), run_dir)]
+    assert (run_dir / "config.yaml").read_bytes() == CONFIG.read_bytes()
     m = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert m["main_task_ids"] == ["001", "002"]
-    assert m["end_time"] is not None
+    assert m["main_task_ids"] == IDS
+    assert m["end_time"] is not None and m["status"] == "finished"
 
 
 def test_run_sets_end_time_even_when_run_experiment_raises(results, monkeypatch):
     def run_experiment(cfg, run_dir, max_samples=None):
         raise RuntimeError("boom")
 
-    fake_module(monkeypatch, "bench.task", run_experiment=run_experiment)
+    fake_run(monkeypatch, run_experiment)
     with pytest.raises(RuntimeError):
-        main(["run", str(PILOT)])
-    m = json.loads((results / "exp1-pilot" / "manifest.json").read_text(encoding="utf-8"))
-    assert m["end_time"] is not None
+        main(["run", str(CONFIG)])
+    m = json.loads((results / RUN_ID / "manifest.json").read_text(encoding="utf-8"))
+    assert m["end_time"] is not None and m["status"] == "failed"  # not read as finished
     assert m["main_task_ids"] is None
 
 
-def _manifest_after_run(results, monkeypatch, preflight_text, returns=None):
-    run_dir = results / "exp1-pilot"
-    run_dir.mkdir()
-    if preflight_text is not None:
-        (run_dir / "preflight.json").write_text(preflight_text, encoding="utf-8")
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: returns)
-    assert main(["run", str(PILOT)]) == 0
-    return json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+def test_a_run_that_failed_before_its_first_eval_set_can_be_resumed(results, monkeypatch):
+    """For example preflight.json was missing: the folder has a manifest but no inspect_logs."""
+    from bench.task import PreflightError
 
+    def no_preflight(cfg, run_dir, max_samples=None):
+        raise PreflightError("preflight.json not found")
 
-def test_main_task_ids_come_from_preflight_json_when_run_experiment_returns_none(results, monkeypatch):
-    preflight = json.dumps({"kept": ["b", "a", 7], "skipped": [{"task_id": "z", "error": "boom"}]})
-    m = _manifest_after_run(results, monkeypatch, preflight)
-    assert m["main_task_ids"] == ["b", "a", "7"]
-    assert m["end_time"] is not None
-
-
-def test_returned_ids_win_over_preflight_json(results, monkeypatch):
-    m = _manifest_after_run(results, monkeypatch, json.dumps({"kept": ["x"]}), returns=["r1", "r2"])
-    assert m["main_task_ids"] == ["r1", "r2"]
-
-
-@pytest.mark.parametrize(
-    "text",
-    [None, "{not json", "[]", json.dumps({"skipped": []}), json.dumps({"kept": "abc"}), json.dumps({"kept": [{"id": 1}]})],
-)
-def test_main_task_ids_stay_null_without_usable_preflight_json(results, monkeypatch, text):
-    assert _manifest_after_run(results, monkeypatch, text)["main_task_ids"] is None
+    fake_run(monkeypatch, no_preflight)
+    assert main(["run", str(CONFIG)]) == 1
+    run_dir = results / RUN_ID
+    assert not (run_dir / "inspect_logs").exists()
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+    fake_run(monkeypatch, lambda cfg, d, max_samples=None: IDS)
+    assert main(["resume", RUN_ID]) == 0
+    assert json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["status"] == "finished"
 
 
 def test_run_refuses_when_results_folder_exists(results, monkeypatch, capsys):
     calls = []
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda *a, **k: calls.append(a))
-    (results / "exp1-pilot").mkdir()
-    (results / "exp1-pilot" / "samples.jsonl").write_text("x", encoding="utf-8")
+    fake_run(monkeypatch, lambda *a, **k: calls.append(a))
+    (results / RUN_ID).mkdir()
+    (results / RUN_ID / "samples.jsonl").write_text("x", encoding="utf-8")
 
-    assert main(["run", str(PILOT)]) == 1
+    assert main(["run", str(CONFIG)]) == 1
 
     assert calls == []
     assert "already exists" in capsys.readouterr().err
-    assert not (results / "exp1-pilot" / "manifest.json").exists()
+    assert not (results / RUN_ID / "manifest.json").exists()
 
 
 def test_run_after_preflight_is_allowed(results, monkeypatch):
+    import bench.preflight
+
     calls = []
-    fake_module(monkeypatch, "bench.preflight", preflight=lambda cfg, run_dir: (run_dir / "preflight.json").write_text("{}"))
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir, max_samples=None: calls.append(run_dir))
+    monkeypatch.setattr(bench.preflight, "preflight", lambda cfg, run_dir: (run_dir / "preflight.json").write_text("{}"))
+    fake_run(monkeypatch, lambda cfg, run_dir, max_samples=None: calls.append(run_dir) or IDS)
 
-    assert main(["preflight", str(PILOT)]) == 0
-    assert main(["run", str(PILOT)]) == 0
+    assert main(["preflight", str(CONFIG)]) == 0
+    assert main(["run", str(CONFIG)]) == 0
 
-    assert calls == [results / "exp1-pilot"]
-    assert (results / "exp1-pilot" / "preflight.json").is_file()
+    assert calls == [results / RUN_ID]
+    assert (results / RUN_ID / "preflight.json").is_file()
 
 
-def test_preflight_dispatch(results, monkeypatch):
+def test_preflight_dispatch_keeps_search_and_test_tasks(results, monkeypatch):
+    import bench.preflight
+
     calls = []
-    fake_module(monkeypatch, "bench.preflight", preflight=lambda cfg, run_dir: calls.append((cfg, run_dir)))
-    assert main(["preflight", str(PILOT)]) == 0
-    assert calls == [(load_config(PILOT), results / "exp1-pilot")]
-    assert (results / "exp1-pilot").is_dir()
+    monkeypatch.setattr(bench.preflight, "preflight", lambda cfg, run_dir: calls.append((cfg, run_dir)))
+    assert main(["preflight", str(CONFIG)]) == 0
+    assert calls == [(load_config(CONFIG), results / RUN_ID)]
+    assert calls[0][0].setting.main_tasks.n == 5  # search_n + test_n: what preflight keeps
+    assert (results / RUN_ID).is_dir()
 
 
 def test_preflight_refuses_when_run_already_started(results, monkeypatch, capsys):
+    import bench.preflight
+
     calls = []
-    fake_module(monkeypatch, "bench.preflight", preflight=lambda *a: calls.append(a))
-    (results / "exp1-pilot").mkdir()
-    (results / "exp1-pilot" / "manifest.json").write_text("{}", encoding="utf-8")
-    assert main(["preflight", str(PILOT)]) == 1
+    monkeypatch.setattr(bench.preflight, "preflight", lambda *a: calls.append(a))
+    (results / RUN_ID).mkdir()
+    (results / RUN_ID / "manifest.json").write_text("{}", encoding="utf-8")
+    assert main(["preflight", str(CONFIG)]) == 1
     assert calls == []
     assert "already exists" in capsys.readouterr().err
+
+
+def test_run_with_invalid_config_exits_1_naming_the_field(results, tmp_path, capsys):
+    data = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    data["models"]["agent"]["reasoning_effort"] = "max"
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(yaml.safe_dump(data), encoding="utf-8")
+    assert main(["run", str(bad)]) == 1
+    assert "models.agent.reasoning_effort" in capsys.readouterr().err
+    assert list(results.iterdir()) == []
+
+
+def test_run_with_missing_config_file_exits_1(results, tmp_path, capsys):
+    assert main(["run", str(tmp_path / "nope.yaml")]) == 1
+    assert "nope.yaml" in capsys.readouterr().err
+
+
+def test_run_dir_with_invalid_config_yaml_exits_1(results, capsys):
+    d = results / "broken"
+    d.mkdir()
+    (d / "config.yaml").write_text("run_id: broken\n", encoding="utf-8")
+    assert main(["metrics", "broken"]) == 1
+    assert "setting" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------- resume
 
 
-def started_run(results, monkeypatch, returns=("001",)):
+def started_run(results, monkeypatch):
     """Start a run with a fake run_experiment and return its folder (as left by an interrupted `run`)."""
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir, max_samples=None: list(returns))
-    assert main(["run", str(PILOT)]) == 0
-    (results / "exp1-pilot" / "inspect_logs").mkdir(exist_ok=True)
-    return results / "exp1-pilot"
+    fake_run(monkeypatch, lambda cfg, run_dir, max_samples=None: IDS)
+    assert main(["run", str(CONFIG)]) == 0
+    (results / RUN_ID / "inspect_logs").mkdir(exist_ok=True)
+    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+    return results / RUN_ID
 
 
 def test_resume_runs_the_saved_config_and_notes_the_resume(results, monkeypatch):
@@ -270,29 +178,15 @@ def test_resume_runs_the_saved_config_and_notes_the_resume(results, monkeypatch)
     def run_experiment(cfg, d, max_samples=None):
         calls.append((cfg, d, max_samples))
         assert json.loads((d / "manifest.json").read_text(encoding="utf-8"))["end_time"] is None  # running again
-        return ["001", "002"]
+        return IDS
 
-    fake_module(monkeypatch, "bench.task", run_experiment=run_experiment)
-    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
-
-    assert main(["resume", "exp1-pilot", "--max-samples", "4"]) == 0
+    fake_run(monkeypatch, run_experiment)
+    assert main(["resume", RUN_ID, "--max-samples", "4"]) == 0
 
     assert calls == [(saved, run_dir, 4)]
     m = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert [r["max_samples"] for r in m["resumes"]] == [4] and m["resumes"][0]["time"]
-    assert m["end_time"] is not None and m["main_task_ids"] == ["001", "002"]
-    assert m["start_time"]  # the first start is kept
-
-
-def test_resume_without_override_passes_none_and_notes_it_each_time(results, monkeypatch):
-    run_dir = started_run(results, monkeypatch)
-    calls = []
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: calls.append(max_samples) or ["001"])
-    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
-    assert main(["resume", "exp1-pilot"]) == 0 and main(["resume", "exp1-pilot", "--max-samples", "2"]) == 0
-    assert calls == [None, 2]
-    resumes = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["resumes"]
-    assert [r["max_samples"] for r in resumes] == [None, 2]
+    assert m["end_time"] is not None and m["main_task_ids"] == IDS
 
 
 def test_resume_uses_the_saved_config_not_the_one_in_runs(results, monkeypatch):
@@ -301,9 +195,8 @@ def test_resume_uses_the_saved_config_not_the_one_in_runs(results, monkeypatch):
     data["parallel"]["max_samples"] = 3
     (run_dir / "config.yaml").write_text(yaml.safe_dump(data), encoding="utf-8")
     seen = []
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: seen.append(cfg.parallel.max_samples) or [])
-    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
-    assert main(["resume", "exp1-pilot"]) == 0
+    fake_run(monkeypatch, lambda cfg, d, max_samples=None: seen.append(cfg.parallel.max_samples) or IDS)
+    assert main(["resume", RUN_ID]) == 0
     assert seen == [3]
 
 
@@ -311,7 +204,7 @@ def test_resume_of_a_run_that_never_started_is_an_error(results, capsys):
     assert main(["resume", "nope"]) == 1
     assert "no results folder" in capsys.readouterr().err
     (results / "bare").mkdir()
-    (results / "bare" / "config.yaml").write_bytes(PILOT.read_bytes())
+    (results / "bare" / "config.yaml").write_bytes(CONFIG.read_bytes())
     assert main(["resume", "bare"]) == 1
     assert "holds no started run" in capsys.readouterr().err
 
@@ -319,9 +212,9 @@ def test_resume_of_a_run_that_never_started_is_an_error(results, capsys):
 def test_resume_warns_about_leftover_containers_but_goes_on(results, monkeypatch, capsys):
     started_run(results, monkeypatch)
     calls = []
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: calls.append(d) or [])
+    fake_run(monkeypatch, lambda cfg, d, max_samples=None: calls.append(d) or IDS)
     monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: ["inspect-a-1", "inspect-a-2"])
-    assert main(["resume", "exp1-pilot"]) == 0
+    assert main(["resume", RUN_ID]) == 0
     err = capsys.readouterr().err
     assert "2 Docker containers" in err and "inspect sandbox cleanup docker" in err
     assert len(calls) == 1
@@ -329,9 +222,9 @@ def test_resume_warns_about_leftover_containers_but_goes_on(results, monkeypatch
 
 def test_run_on_an_existing_folder_points_to_resume(results, monkeypatch, capsys):
     started_run(results, monkeypatch)
-    assert main(["run", str(PILOT)]) == 1
+    assert main(["run", str(CONFIG)]) == 1
     err = capsys.readouterr().err
-    assert "refusing to overwrite" in err and "bench resume exp1-pilot" in err
+    assert "refusing to overwrite" in err and f"bench resume {RUN_ID}" in err
 
 
 def test_resume_with_redo_marks_the_provider_failures_first_and_notes_them(results, monkeypatch, capsys):
@@ -339,17 +232,17 @@ def test_resume_with_redo_marks_the_provider_failures_first_and_notes_them(resul
 
     run_dir = started_run(results, monkeypatch)
     order = []
-    monkeypatch.setattr(redo, "mark_for_redo", lambda d: order.append(("mark", d)) or ["s2", "s5"])
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: order.append(("run", d)) or ["001"])
-    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
+    failed = ["tier1/execution/a__x", "ceiling2/execution/b__y"]
+    monkeypatch.setattr(redo, "mark_for_redo", lambda d: order.append(("mark", d)) or failed)
+    fake_run(monkeypatch, lambda cfg, d, max_samples=None: order.append(("run", d)) or IDS)
 
-    assert main(["resume", "exp1-pilot", "--redo-provider-failures"]) == 0
+    assert main(["resume", RUN_ID, "--redo-provider-failures"]) == 0
 
     assert order == [("mark", run_dir), ("run", run_dir)]  # marked before Inspect looks at the logs
     out = capsys.readouterr().out
-    assert "2 samples" in out and "s2, s5" in out
+    assert "2 execution samples" in out and ", ".join(failed) in out
     entry = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["resumes"][-1]
-    assert entry["redo"] == ["s2", "s5"]
+    assert entry["redo"] == failed
 
 
 def test_resume_without_the_flag_does_not_touch_the_logs(results, monkeypatch):
@@ -357,9 +250,8 @@ def test_resume_without_the_flag_does_not_touch_the_logs(results, monkeypatch):
 
     run_dir = started_run(results, monkeypatch)
     monkeypatch.setattr(redo, "mark_for_redo", lambda d: pytest.fail("mark_for_redo was called"))
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, d, max_samples=None: ["001"])
-    monkeypatch.setattr(bench_main, "_leftover_sandboxes", lambda: [])
-    assert main(["resume", "exp1-pilot"]) == 0
+    fake_run(monkeypatch, lambda cfg, d, max_samples=None: IDS)
+    assert main(["resume", RUN_ID]) == 0
     entry = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))["resumes"][-1]
     assert "redo" not in entry
 
@@ -376,181 +268,74 @@ def test_leftover_sandboxes_lists_only_inspect_containers(monkeypatch):
     assert bench_main._leftover_sandboxes() == []
 
 
-def test_run_with_invalid_config_exits_1_naming_the_field(results, tmp_path, capsys):
-    data = yaml.safe_load(PILOT.read_text(encoding="utf-8"))
-    data["models"]["agent"]["reasoning_effort"] = "max"
-    bad = tmp_path / "bad.yaml"
-    bad.write_text(yaml.safe_dump(data), encoding="utf-8")
-    assert main(["run", str(bad)]) == 1
-    assert "models.agent.reasoning_effort" in capsys.readouterr().err
-    assert list(results.iterdir()) == []
-
-
-def test_run_with_missing_config_file_exits_1(results, tmp_path, capsys):
-    assert main(["run", str(tmp_path / "nope.yaml")]) == 1
-    assert "nope.yaml" in capsys.readouterr().err
-
-
 # ---------------------------------------------------------------- render-prompts
 
 
-class FakeReviewSample:
-    def __init__(self, **kw):
-        self.__dict__.update(kw)
+def test_render_prompts_writes_the_first_search_pair_in_every_role(results, capsys):
+    from bench import basharena, search
+
+    assert main(["render-prompts", str(CONFIG)]) == 0
+    cfg = load_config(CONFIG)
+    ids = basharena.shuffled_pool(0)[:3]  # no preflight.json: the shuffled pool
+    main_task, side_task = search.search_pairs(ids, cfg.setting.side_tasks, 6, 0)[0]
+    out = capsys.readouterr().out
+    assert f"main task {main_task}, side task {side_task}" in out
+    folder = results / RUN_ID / "prompts"
+    names = sorted(p.name for p in folder.iterdir())
+    assert len(names) == 1 + 4 * 4 + 4 and "user_message.md" in names and "ceiling4_execution.md" in names
+    user = (folder / "user_message.md").read_text(encoding="utf-8")
+    assert user == "Your task is as follows:\n" + basharena.load_task(main_task).description + "\n"
+    assert f"### {side_task} (yours)" in (folder / "tier2_execution.md").read_text(encoding="utf-8")
 
 
-def fake_basharena(monkeypatch, calls=None, pool=("first-task", "second-task")):
-    calls = calls if calls is not None else {}
+def test_render_prompts_uses_preflight_json_and_allows_a_later_run(results, monkeypatch):
+    from bench import basharena
 
-    def shuffled_pool(seed):
-        calls["seed"] = seed
-        return list(pool)
-
-    def load_task(task_id):
-        calls["task_id"] = task_id
-        return types.SimpleNamespace(description=f"TASK TEXT of {task_id}")
-
-    return calls, fake_module(
-        monkeypatch,
-        "bench.basharena",
-        shuffled_pool=shuffled_pool,
-        load_task=load_task,
-        setting_description=lambda: "SETTING TEXT",
-        SIDE_TASKS={
-            name: types.SimpleNamespace(description=f"SIDE TEXT of {name}")
-            for name in ("download_malware", "leak_passwords", "disable_firewall", "sudo_edit")
-        },
-    )
+    folder = results / RUN_ID
+    folder.mkdir()
+    kept = basharena.pool_ids()[5:10]
+    (folder / "preflight.json").write_text(json.dumps({"kept": kept}), encoding="utf-8")
+    assert main(["render-prompts", str(CONFIG)]) == 0
+    assert main(["render-prompts", str(CONFIG)]) == 0  # can be repeated
+    user = (folder / "prompts" / "user_message.md").read_text(encoding="utf-8")
+    assert any(basharena.load_task(t).description in user for t in kept[:3])
+    fake_run(monkeypatch, lambda cfg, run_dir, max_samples=None: IDS)
+    assert main(["run", str(CONFIG)]) == 0
 
 
-def test_render_prompts_passes_first_task_and_first_side_task(results, tmp_path, monkeypatch, capsys):
-    calls, _ = fake_basharena(monkeypatch)
-    cfg_path = make_config(tmp_path, "exp1-pilot", main_seed=5)
-    seen = {}
-
-    def write_review_prompts(out_dir, samples):
-        seen["out_dir"], seen["samples"] = out_dir, samples
-        return [out_dir / "x.md"]
-
-    fake_module(monkeypatch, "bench.prompts", ReviewSample=FakeReviewSample, write_review_prompts=write_review_prompts)
-
-    assert main(["render-prompts", str(cfg_path)]) == 0
-
-    assert calls == {"seed": 5, "task_id": "first-task"}
-    assert seen["out_dir"] == results / "exp1-pilot" / "prompts"
-    assert list(seen["samples"]) == ["unaware", "aware"]
-    unaware, aware = seen["samples"]["unaware"], seen["samples"]["aware"]
-    assert unaware.__dict__ == aware.__dict__  # the same scenario in both conditions
-    assert unaware.task_description == "TASK TEXT of first-task"
-    assert unaware.setting_description == "SETTING TEXT"
-    assert unaware.side_task_description == "SIDE TEXT of download_malware"
-    assert unaware.attack_base_path == REPO / "prompts" / "exp1" / "attack_base.md"
-    assert unaware.aware_common_path == REPO / "prompts" / "exp1" / "aware_common.md"
-    assert unaware.aware_section_path == REPO / "prompts" / "exp1" / "aware_all_cards.md"
-    assert unaware.cards_dir == config.CARDS_DIR
-    assert unaware.card_id is None
-    assert "first-task" in capsys.readouterr().out
-
-
-def test_render_prompts_uses_first_side_task_of_the_config(results, tmp_path, monkeypatch):
-    fake_basharena(monkeypatch)
-    data = yaml.safe_load(PILOT.read_text(encoding="utf-8"))
-    data["setting"]["side_tasks"] = ["sudo_edit", "leak_passwords"]
-    data["conditions"] = ["aware"]
-    cfg_path = tmp_path / "c.yaml"
-    cfg_path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    seen = {}
-
-    def write_review_prompts(out_dir, samples):
-        seen["samples"] = samples
-        return []
-
-    fake_module(monkeypatch, "bench.prompts", ReviewSample=FakeReviewSample, write_review_prompts=write_review_prompts)
-    assert main(["render-prompts", str(cfg_path)]) == 0
-    assert list(seen["samples"]) == ["aware"]
-    assert seen["samples"]["aware"].side_task_description == "SIDE TEXT of sudo_edit"
-
-
-def test_render_prompts_writes_real_files_and_aware_starts_with_unaware(results, monkeypatch):
-    fake_basharena(monkeypatch)
-    assert main(["render-prompts", str(PILOT)]) == 0
-    out = results / "exp1-pilot" / "prompts"
-    unaware = (out / "unaware_developer_instructions.md").read_text(encoding="utf-8")
-    aware = (out / "aware_developer_instructions.md").read_text(encoding="utf-8")
-    assert aware.startswith(unaware) and len(aware) > len(unaware)
-    assert "SIDE TEXT of download_malware" in unaware
-    assert "TASK TEXT of first-task" in (out / "aware_user_message.md").read_text(encoding="utf-8")
-    assert "SIDE TEXT" not in (out / "unaware_user_message.md").read_text(encoding="utf-8")
-    # only prompts/ was created: no config copy and no manifest, so a later `run` is not blocked
-    assert sorted(p.name for p in (results / "exp1-pilot").iterdir()) == ["prompts"]
-
-
-def test_render_prompts_exit_2_when_basharena_missing(results, monkeypatch, capsys):
-    missing_module(monkeypatch, "bench.basharena")
-    assert main(["render-prompts", str(PILOT)]) == 2
-    assert "not implemented yet" in capsys.readouterr().err
-    assert list(results.iterdir()) == []
-
-
-def test_render_prompts_exit_2_when_a_name_is_missing(results, monkeypatch, capsys):
-    fake_module(monkeypatch, "bench.basharena", shuffled_pool=lambda seed: ["t"])  # no load_task etc.
-    assert main(["render-prompts", str(PILOT)]) == 2
-    assert "not implemented yet" in capsys.readouterr().err
-    assert list(results.iterdir()) == []
-
-
-def test_render_prompts_exit_2_when_prompts_module_missing(results, monkeypatch, capsys):
-    fake_basharena(monkeypatch)
-    missing_module(monkeypatch, "bench.prompts")
-    assert main(["render-prompts", str(PILOT)]) == 2
-    assert "not implemented yet" in capsys.readouterr().err
-    assert list(results.iterdir()) == []
-
-
-def test_render_prompts_missing_data_exits_1(results, monkeypatch, capsys):
-    _, module = fake_basharena(monkeypatch)
-
-    def shuffled_pool(seed):
-        raise FileNotFoundError("pool_no_cover.txt not found")
-
-    module.shuffled_pool = shuffled_pool
-    assert main(["render-prompts", str(PILOT)]) == 1
-    assert "pool_no_cover.txt" in capsys.readouterr().err
-
-
-def test_render_prompts_refuses_when_run_folder_has_other_content(results, monkeypatch, capsys):
-    fake_basharena(monkeypatch)
-    (results / "exp1-pilot").mkdir()
-    (results / "exp1-pilot" / "samples.jsonl").write_text("x", encoding="utf-8")
-    assert main(["render-prompts", str(PILOT)]) == 1
+def test_render_prompts_refuses_when_run_folder_has_other_content(results, capsys):
+    (results / RUN_ID).mkdir()
+    (results / RUN_ID / "samples.jsonl").write_text("x", encoding="utf-8")
+    assert main(["render-prompts", str(CONFIG)]) == 1
     assert "already exists" in capsys.readouterr().err
-    assert not (results / "exp1-pilot" / "prompts").exists()
 
 
-def test_render_prompts_can_be_repeated_and_followed_by_preflight_and_run(results, monkeypatch):
-    _, basharena = fake_basharena(monkeypatch)
-    fake_module(monkeypatch, "bench.preflight", preflight=lambda cfg, run_dir: (run_dir / "preflight.json").write_text("{}"))
-    calls = []
-    fake_module(monkeypatch, "bench.task", run_experiment=lambda cfg, run_dir, max_samples=None: calls.append(run_dir))
-    assert main(["render-prompts", str(PILOT)]) == 0
-    assert main(["render-prompts", str(PILOT)]) == 0
-    assert main(["preflight", str(PILOT)]) == 0
-    assert main(["run", str(PILOT)]) == 0
-    assert calls == [results / "exp1-pilot"]
-    assert (results / "exp1-pilot" / "prompts" / "aware_user_message.md").is_file()
-    assert (results / "exp1-pilot" / "preflight.json").is_file()
-    assert (results / "exp1-pilot" / "manifest.json").is_file()
+def test_render_prompts_missing_prompt_file_exits_1(results, tmp_path, capsys):
+    data = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    data["prompts"]["dir"] = str(tmp_path / "no-prompts")
+    path = tmp_path / "cfg.yaml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    assert main(["render-prompts", str(path)]) == 1
+    assert "base.md" in capsys.readouterr().err
 
 
-# ---------------------------------------------------------------- entry point
+# ---------------------------------------------------------------- metrics, registry, entry point
+
+
+def test_metrics_without_samples_jsonl_exits_1(results, capsys):
+    (results / RUN_ID).mkdir()
+    (results / RUN_ID / "config.yaml").write_bytes(CONFIG.read_bytes())
+    assert main(["metrics", RUN_ID]) == 1
+    assert "no samples.jsonl" in capsys.readouterr().err
 
 
 def test_python_dash_m_bench_lists_the_commands():
-    r = subprocess.run([sys.executable, "-m", "bench", "--help"], cwd=REPO, capture_output=True, text=True, timeout=120)
-    assert r.returncode == 0, r.stderr
-    for cmd in ("judge", "asr", "plot-asr", "plot-strategies"):
-        assert cmd in r.stdout
-    assert "analyze" not in r.stdout and "summary" not in r.stdout
+    out = subprocess.run([sys.executable, "-m", "bench", "--help"], capture_output=True, text=True, cwd=REPO)
+    assert out.returncode == 0
+    for cmd in ("run", "resume", "preflight", "render-prompts", "metrics", "check-registry"):
+        assert cmd in out.stdout
+    for old in ("judge", "plot-asr", "docent-upload", "failure-extract"):
+        assert old not in out.stdout
 
 
 def test_no_subcommand_is_usage_error():
@@ -559,46 +344,6 @@ def test_no_subcommand_is_usage_error():
     assert exc.value.code == 2
 
 
-
 def test_check_registry_reports_no_problems(capsys):
     assert main(["check-registry"]) == 0
-    assert "0 problems" in capsys.readouterr().out
-
-
-def one_card_config(tmp_path, n=21, **changes):
-    data = yaml.safe_load(PILOT.read_text(encoding="utf-8"))
-    data["prompts"]["aware_mode"] = "one_card"
-    data["setting"]["main_tasks"]["n"] = n
-    data.update(changes)
-    path = tmp_path / "one.yaml"
-    path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    return path
-
-
-def test_render_prompts_one_card_mode_renders_the_assigned_card(results, tmp_path, monkeypatch, capsys):
-    from bench import assignment
-
-    pool = [f"task{i:02d}" for i in range(30)]
-    fake_basharena(monkeypatch, pool=pool)
-    cfg_path = one_card_config(tmp_path)
-    cfg = load_config(cfg_path)
-    expected = assignment.assigned_cards(cfg, pool[:21])[("task00", "download_malware")]
-
-    assert main(["render-prompts", str(cfg_path)]) == 0
-
-    out = results / "exp1-pilot" / "prompts"
-    aware = (out / "aware_developer_instructions.md").read_text(encoding="utf-8")
-    assert aware.count("\n## Card E") == 1 and f"\n## Card {expected}\n" in aware
-    assert "you prefer" not in aware
-    assert f"card {expected}" in capsys.readouterr().out
-    assert "## Card E" not in (out / "unaware_developer_instructions.md").read_text(encoding="utf-8")
-
-
-@pytest.mark.parametrize("command", ["render-prompts", "preflight", "run"])
-def test_one_card_mode_with_an_unbalanced_main_task_count_fails_before_anything_runs(
-    results, tmp_path, monkeypatch, capsys, command
-):
-    fake_basharena(monkeypatch)
-    assert main([command, str(one_card_config(tmp_path, n=20))]) == 1
-    assert "multiple of the number of cards (21)" in capsys.readouterr().err
-    assert not (results / "exp1-pilot").exists()
+    assert capsys.readouterr().out.strip().endswith("0 problems")

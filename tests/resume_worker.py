@@ -29,7 +29,8 @@ def slow(seconds: float):
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         note(f"start {state.sample_id}")
         await asyncio.sleep(seconds)
-        # what bench.solver stores per sample; the run folder is <work dir>, the logs <work dir>/inspect_logs
+        # what bench.solver stores per sample; the run folder is <work dir>, the logs <work dir>/inspect_logs, the sample
+        # folders (metadata `dir`) <work dir>/samples/<id>
         state.store.set("meltzer", {"exit_code": 1 if str(state.sample_id) in exit_one else 0})
         note(f"end {state.sample_id}")
         return state
@@ -46,7 +47,7 @@ def always_correct():
 
 
 task = Task(
-    dataset=MemoryDataset([Sample(input="x", id=f"s{i}") for i in range(8)]),
+    dataset=MemoryDataset([Sample(input="x", id=f"s{i}", metadata={"dir": f"samples/s{i}"}) for i in range(8)]),
     solver=slow(seconds),
     scorer=always_correct(),
     name="resume-probe",

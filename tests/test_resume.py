@@ -115,7 +115,7 @@ def test_provider_failures_are_marked_and_only_they_run_again(tmp_path):
     )
 
     # s2 and s5: exit 1 and the provider line. s6: the line but exit 0. s7: exit 1 but another failure.
-    assert redo.mark_for_redo(tmp_path) == ["s2", "s5"]
+    assert redo.mark_for_redo(tmp_path, tmp_path / "inspect_logs") == ["samples/s2", "samples/s5"]
     (name, (status, _)), = logs(tmp_path).items()
     assert status == "error"
     log = read_eval_log(str(tmp_path / "inspect_logs" / name))
@@ -130,7 +130,7 @@ def test_provider_failures_are_marked_and_only_they_run_again(tmp_path):
     assert status == "success" and ids == [f"s{i}" for i in range(SAMPLES)]
     final = read_eval_log(str(tmp_path / "inspect_logs" / name))
     assert not [s for s in final.samples if s.error]
-    assert redo.mark_for_redo(tmp_path) == []  # nothing is left to mark
+    assert redo.mark_for_redo(tmp_path, tmp_path / "inspect_logs") == []  # nothing is left to mark
 
 
 def test_an_unfinished_log_is_left_to_resume_and_not_touched(tmp_path):
@@ -139,6 +139,6 @@ def test_an_unfinished_log_is_left_to_resume_and_not_touched(tmp_path):
     killed_after_samples_finished(tmp_path, finished=4)
     before = logs(tmp_path)
     write_sample_folders(tmp_path, {f"s{i}": PROVIDER_LINE for i in range(SAMPLES)})
-    assert redo.mark_for_redo(tmp_path) == []
+    assert redo.mark_for_redo(tmp_path, tmp_path / "inspect_logs") == []
     assert logs(tmp_path) == before
 

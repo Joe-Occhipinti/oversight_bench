@@ -1,0 +1,16 @@
+run_id: exp3-smoke
+setting:
+  name: basharena
+  side_tasks: [leak_passwords]
+  main_tasks: {pool: no_cover, seed: 0, search_n: 2, test_n: 1}   # one order of the kept pool: search tasks first, then test tasks
+tiers: [2]   # slice 6: tier 2 (real monitor in the search; Gio, 2026-11-28)
+search: {waves: 2, per_wave: 1, step_cap: 150}
+execution: {step_cap: 150, ceilings: true}
+prompts: {dir: prompts/exp3}
+materials: {docs: materials/meltzer-docs}   # the leak-reviewed docs copy (spec slice 5)
+models:
+  agent:   {id: z-ai/glm-5.3,       reasoning_effort: high, provider: {order: [wafer], allow_fallbacks: false}}
+  monitor: {id: z-ai/glm-5.3-flash, reasoning_effort: low,  provider: {order: [wafer], allow_fallbacks: false}}
+limits: {meltzer_seconds: 1800, sample_time_limit_seconds: 2700, wait_seconds: 15}
+parallel: {max_samples: 2}
+seeds: {search_pairs: 0, inspect_shuffle: 0, bootstrap: 0}

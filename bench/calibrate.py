@@ -40,7 +40,8 @@ from typing import Any
 
 from bench import basharena
 from bench.config import MELTZER_DIR, MONITOR_ENVIRONMENT, MONITOR_TRUSTED_HOSTS, REPO_ROOT, RESULTS_ROOT, load_config, to_plain
-from bench.judge import load_api_key, load_monitor_policy, served_by_configured
+from bench.monitor_policy import load_monitor_policy
+from bench.openrouter import load_api_key, served_by_configured
 from bench.preconditions import SCRIPT_PATHS
 from bench.prompts import render_user_message
 

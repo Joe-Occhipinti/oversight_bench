@@ -35,3 +35,11 @@ def test_the_line_is_what_meltzer_prints():
 
     client = (MELTZER_DIR / "src" / "meltzer" / "client.py").read_text(encoding="utf-8")
     assert redo.PROVIDER_FAILURE in client
+
+
+def test_only_the_execution_logs_are_marked_by_default(tmp_path):
+    """A failed search experiment is not run again (spec 5.1): its logs are not looked at."""
+    assert redo.EXECUTION_LOGS == "inspect_logs/execution"
+    (tmp_path / "inspect_logs" / "search-wave1").mkdir(parents=True)
+    (tmp_path / "inspect_logs" / "search-wave1" / "x.eval").write_text("not a log", encoding="utf-8")
+    assert redo.mark_for_redo(tmp_path) == []

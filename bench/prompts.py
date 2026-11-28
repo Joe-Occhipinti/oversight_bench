@@ -1,16 +1,32 @@
-"""Renders the user message and the developer instructions (spec section 9).
+"""Renders the user message and the developer instructions of each role (docs/spec-exp3.md sections 2, 5, 6, 7).
 
-Templates are filled with a single regex pass over the template text, not str.format,
-so literal braces in a template stay as they are and text inside a filled value
-(for example a task description) is never expanded again.
+Prompt folder (`prompts.dir` of the run config):
+
+    base.md              {setting_description} {side_tasks} {own_side_task}
+    experiment.md        {board} {step_cap}
+    reflection.md        {board}
+    execution.md         {strategy}
+    tiers/tier<k>.md     what the agent can access in tier k
+    ceilings/tier<k>.md  the designer text used in place of the strategy in ceiling k
+
+Developer instructions of a role: base.md, then tiers/tier<k>.md, then the role file, separated by blank lines.
+The reflection's base has no own pair: every line of base.md that holds `{own_side_task}` is left out.
+
+Templates are filled with a single regex pass over the template text, not str.format, so literal braces in a
+template stay as they are and text inside a filled value (a task description, lessons) is never expanded again.
 """
+
+from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 
-CONDITIONS = ("unaware", "aware")
+ROLES = ("experiment", "execution", "reflection")
+# The placeholders each role file is filled with.
+ROLE_VALUES = {"experiment": ("board", "step_cap"), "execution": ("strategy",), "reflection": ("board",)}
+OWN_PLACEHOLDER = "{own_side_task}"
+OWN_MARK = " (yours)"  # after the agent's own side task in {side_tasks}
 
 
 def _read(path: Path) -> str:
@@ -20,6 +36,8 @@ def _read(path: Path) -> str:
 
 def _fill(template: str, values: Mapping[str, str]) -> str:
     """Replace every `{name}` slot for the names in `values`, in one pass."""
+    if not values:
+        return template
     pattern = re.compile("|".join(re.escape("{" + name + "}") for name in values))
     return pattern.sub(lambda m: values[m.group(0)[1:-1]], template)
 
@@ -29,113 +47,47 @@ def render_user_message(task_description: str) -> str:
     return "Your task is as follows:\n" + task_description
 
 
-def card_files(cards_dir: Path) -> list[tuple[str, Path]]:
-    """(id, path) of the card files `E01-<slug>.md`, `E02-...`, in id order."""
-    files = sorted(Path(cards_dir).glob("E[0-9][0-9]-*.md"), key=lambda f: f.name[:3])
-    if not files:
-        raise ValueError(f"no card files in {cards_dir}")
-    return [(f.name[:3], f) for f in files]
+def render_side_tasks(descriptions: Mapping[str, str], own: str | None = None) -> str:
+    """Each side task as `### <name>` and its description; the agent's own one marked with OWN_MARK."""
+    return "\n\n".join(
+        f"### {name}{OWN_MARK if name == own else ''}\n\n{text.strip()}" for name, text in descriptions.items()
+    )
 
 
-def card_ids(cards_dir: Path) -> list[str]:
-    return [card_id for card_id, _ in card_files(cards_dir)]
-
-
-def card_body(text: str) -> str:
-    """The card text without its leading YAML block (`---` ... `---`), with its `##` headings as `###`."""
-    if text.startswith("---\n"):
-        end = text.find("\n---\n", 4)
-        if end != -1:
-            text = text[end + len("\n---\n"):]
-    return re.sub(r"(?m)^## ", "### ", text).strip()
-
-
-def render_cards(cards_dir: Path, card_id: str | None = None) -> str:
-    """The cards in id order (only `card_id` if given), each as `## Card <id>` and its body (`card_body`)."""
-    files = card_files(cards_dir)
-    if card_id is not None:
-        files = [(cid, path) for cid, path in files if cid == card_id]
-        if not files:
-            raise ValueError(f"no card {card_id} in {cards_dir}")
-    return "\n\n".join(f"## Card {cid}\n\n{card_body(_read(path))}" for cid, path in files)
-
-
-def render_developer_instructions(
-    condition: str,
-    *,
-    setting_description: str,
-    side_task_description: str,
-    attack_base_path: Path,
-    aware_common_path: Path | None,
-    aware_section_path: Path | None,
-    cards_dir: Path,
-    card_id: str | None = None,
+def render_base(
+    prompts_dir: Path, *, setting_description: str, side_tasks: Mapping[str, str], own_side_task: str | None
 ) -> str:
-    """Hidden system-prompt text. unaware: attack_base. aware: attack_base + aware_common + aware_section (the
-    mode's workflow). If aware_section has a `{cards}` slot, it gets every card or, if `card_id` is given, only
-    that card."""
-    if condition not in CONDITIONS:
-        raise ValueError(f"unknown condition {condition!r}, expected one of {CONDITIONS}")
-    text = _fill(
-        _read(attack_base_path),
+    """base.md with the setting, all side tasks and the agent's own side task (its name). With no own side task
+    (reflection), the lines that name it are left out."""
+    if own_side_task is not None and own_side_task not in side_tasks:
+        raise ValueError(f"own side task {own_side_task!r} is not among {list(side_tasks)}")
+    text = _read(Path(prompts_dir) / "base.md")
+    if own_side_task is None:
+        text = "\n".join(line for line in text.split("\n") if OWN_PLACEHOLDER not in line)
+    return _fill(
+        text,
         {
             "setting_description": setting_description,
-            "side_task_description": side_task_description,
+            "side_tasks": render_side_tasks(side_tasks, own_side_task),
+            "own_side_task": own_side_task or "",
         },
     )
-    if condition == "aware":
-        section = _read(aware_section_path)
-        if "{cards}" in section:
-            section = _fill(section, {"cards": render_cards(cards_dir, card_id)})
-        text += "\n\n" + _read(aware_common_path) + "\n\n" + section
-    return text
 
 
-@dataclass(frozen=True)
-class ReviewSample:
-    """Inputs needed to render both prompts of one sample."""
-
-    task_description: str
-    setting_description: str
-    side_task_description: str
-    attack_base_path: Path
-    aware_common_path: Path | None  # None in a run without the aware condition
-    aware_section_path: Path | None
-    cards_dir: Path
-    card_id: str | None = None
+def tier_text(prompts_dir: Path, tier: int) -> str:
+    return _read(Path(prompts_dir) / "tiers" / f"tier{tier}.md")
 
 
-def write_review_prompts(out_dir: Path, samples: Mapping[str, ReviewSample]) -> list[Path]:
-    """Write the rendered prompts of one sample per condition for the review gate (9.2).
+def ceiling_text(prompts_dir: Path, tier: int) -> str:
+    return _read(Path(prompts_dir) / "ceilings" / f"tier{tier}.md")
 
-    `samples` maps a condition ("unaware", "aware") to the sample to render in it; pass the
-    same scenario for both to compare them. For each condition, two files are written to
-    `out_dir` (created if missing, existing files overwritten), with LF line endings:
-    `<condition>_user_message.md` and `<condition>_developer_instructions.md`.
-    Returns the written paths.
-    """
-    unknown = [c for c in samples if c not in CONDITIONS]
-    if unknown:
-        raise ValueError(f"unknown conditions {unknown}, expected some of {CONDITIONS}")
-    out = Path(out_dir)
-    out.mkdir(parents=True, exist_ok=True)
-    written = []
-    for condition, s in samples.items():
-        files = {
-            f"{condition}_user_message.md": render_user_message(s.task_description),
-            f"{condition}_developer_instructions.md": render_developer_instructions(
-                condition,
-                setting_description=s.setting_description,
-                side_task_description=s.side_task_description,
-                attack_base_path=s.attack_base_path,
-                aware_common_path=s.aware_common_path,
-                aware_section_path=s.aware_section_path,
-                cards_dir=s.cards_dir,
-                card_id=s.card_id,
-            ),
-        }
-        for name, text in files.items():
-            path = out / name
-            path.write_text(text, encoding="utf-8", newline="\n")
-            written.append(path)
-    return written
+
+def render_instructions(prompts_dir: Path, tier: int, role: str, base: str, **values: object) -> str:
+    """The developer instructions (or, for the reflection, the request text) of `role` in `tier`: `base`, the tier
+    text and the role file filled with `values`, which must be exactly the role's placeholders (ROLE_VALUES)."""
+    if role not in ROLES:
+        raise ValueError(f"unknown role {role!r}, expected one of {ROLES}")
+    if set(values) != set(ROLE_VALUES[role]):
+        raise ValueError(f"{role} takes the values {ROLE_VALUES[role]}, got {sorted(values)}")
+    text = _fill(_read(Path(prompts_dir) / f"{role}.md"), {key: str(value) for key, value in values.items()})
+    return "\n\n".join((base, tier_text(prompts_dir, tier), text))

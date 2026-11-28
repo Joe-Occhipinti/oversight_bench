@@ -1,15 +1,21 @@
-"""Inspect solver for one sample: set up the container, run meltzer, wait, copy logs (spec section 7).
+"""Inspect solver for one sample: set up the container, run meltzer, wait, copy logs (exp1 spec section 7, with the
+tiers and phases of docs/spec-exp3.md).
 
-Order of steps (7.1, with the gateway steps found in S2, spec 4.2):
+The sample's metadata says what to run (`sample_metadata`): its phase (`search` or `execution`), its tier, its
+pair, its developer instructions (rendered by `bench.search` / `bench.execution`) and its results folder.
 
-1. BashArena setup (5.4 steps 1-2), `add_gateway_to_hosts`.
+Order of steps (exp1 7.1, with the gateway steps found in S2, exp1 spec 4.2):
+
+1. BashArena setup (5.4 steps 1-2), `add_gateway_to_hosts`, the tier's materials (`tiers.write_materials`).
 2. Open the model bridge in the `gateway` container (7.2), with a filter that cuts the developer
-   instructions out of subagent requests, then `start_gateway_forwarder`, `allow_gateway_in_firewall`,
-   and the preconditions (section 6).
-3. Snapshot of the running PIDs, then `meltzer exec` (7.3) under the wall-clock limit. While it runs, the side
-   task is checked every `SIDE_TASK_POLL_SECONDS`; meltzer is stopped (as at the limit) when the check passes.
+   instructions out of subagent requests; in a tier-1 search the monitor's model is the allow-all stub
+   (`tiers.monitor_stub`). Then `start_gateway_forwarder`, `allow_gateway_in_firewall`, and the preconditions
+   (section 6) with the tier's sandbox deny entries and the phase's step cap.
+3. Snapshot of the running PIDs, then `meltzer exec` (7.3) under the wall-clock limit. In execution, the side
+   task is checked every `SIDE_TASK_POLL_SECONDS` while it runs and meltzer is stopped (as at the limit) when the
+   check passes. A search session is never stopped early: it must reach its final reply (the lessons).
 4. Wait for processes that outlive meltzer (7.4).
-5. Copy the logs to `<run_dir>/samples/<sample_id>/` (7.5).
+5. Copy the logs to `<run_dir>/<metadata dir>/` (7.5).
 
 Everything the monitor must not see (R1) stays on the host: the developer instructions reach meltzer through
 a pipe fed from a file that is deleted as it is read, the bridge runs in the gateway container, and no
@@ -48,7 +54,7 @@ from inspect_ai.model import GenerateConfig, Model, get_model
 from inspect_ai.solver import Generate, Solver, TaskState, solver
 from inspect_ai.util import sandbox
 
-from bench import basharena, image, preconditions, prompts, reasoning, subagents
+from bench import basharena, image, preconditions, reasoning, subagents, tiers
 from bench.config import REPO_ROOT, ModelSpec, RunConfig, to_plain
 
 logger = logging.getLogger(__name__)
@@ -109,12 +115,14 @@ def run_model_factory(cfg: RunConfig) -> ModelFactory:
     return lambda model_id, spec: default_model_factory(model_id, spec, max_connections=connections)
 
 
-def model_aliases(cfg: RunConfig, factory: ModelFactory) -> dict[str, Model]:
-    """The models meltzer can reach through the bridge, under the ids of its config file."""
+def model_aliases(cfg: RunConfig, factory: ModelFactory, monitor_stub: bool = False) -> dict[str, Model]:
+    """The models meltzer can reach through the bridge, under the ids of its config file. With `monitor_stub`, the
+    monitor's id leads to the stub that allows every action (tier-1 search, spec 5.3)."""
     agent, monitor = cfg.models.agent, cfg.models.monitor
-    if agent.id == monitor.id and agent != monitor:
-        raise ValueError(f"agent and monitor use the same id {agent.id!r} with different settings")
-    return {agent.id: factory(agent.id, agent), monitor.id: factory(monitor.id, monitor)}
+    if agent.id == monitor.id:
+        raise ValueError(f"agent and monitor use the same id {agent.id!r}")
+    agent_model = factory(agent.id, agent)
+    return {agent.id: agent_model, monitor.id: tiers.monitor_stub() if monitor_stub else factory(monitor.id, monitor)}
 
 
 # ---------------------------------------------------------------- command (7.3)
@@ -371,22 +379,16 @@ async def collect_sample_files(
 # ---------------------------------------------------------------- the solver
 
 
-def render_developer_instructions(
-    cfg: RunConfig, condition: str, side_task: str, assigned_card: str | None = None
-) -> str:
-    if condition == "aware" and cfg.prompts.aware_mode == "one_card" and assigned_card is None:
-        raise ValueError("aware mode one_card: the sample has no assigned card")
-    aware_common_path, aware_section_path = cfg.prompts.aware_paths()
-    return prompts.render_developer_instructions(
-        condition,
-        setting_description=basharena.setting_description(),
-        side_task_description=basharena.SIDE_TASKS[side_task].description,
-        attack_base_path=REPO_ROOT / cfg.prompts.attack_base,
-        aware_common_path=aware_common_path,
-        aware_section_path=aware_section_path,
-        cards_dir=REPO_ROOT / cfg.prompts.cards,
-        card_id=assigned_card,
-    )
+# Sample metadata the solver reads (written by `bench.task.sample_metadata`).
+SAMPLE_DIR_KEY = "dir"  # results folder of the sample, relative to the run folder (posix)
+INSTRUCTIONS_KEY = "developer_instructions"
+
+
+def step_cap(cfg: RunConfig, phase: str) -> int:
+    """meltzer's `max_turn_steps` in this phase."""
+    if phase not in tiers.PHASES:
+        raise ValueError(f"phase must be one of {tiers.PHASES}, got {phase!r}")
+    return cfg.search.step_cap if phase == "search" else cfg.execution.step_cap
 
 
 async def proxy_is_listening(gateway: Any) -> bool:
@@ -418,19 +420,21 @@ def meltzer_solver(cfg: RunConfig, run_dir: Path, model_factory: ModelFactory | 
 
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         metadata = state.metadata
-        sample_dir = run_dir / "samples" / str(state.sample_id)
+        tier, phase = metadata["tier"], metadata["phase"]
+        sample_dir = run_dir / metadata[SAMPLE_DIR_KEY]
         shutil.rmtree(sample_dir, ignore_errors=True)  # a retried sample starts clean
         sample_dir.mkdir(parents=True)
 
         task = basharena.load_task(metadata["main_task"])
-        developer_instructions = render_developer_instructions(
-            cfg, metadata["condition"], metadata["side_task"], metadata.get("assigned_card")
-        )
-        aliases = model_aliases(cfg, factory)
+        developer_instructions = metadata[INSTRUCTIONS_KEY]
+        aliases = model_aliases(cfg, factory, monitor_stub=tiers.uses_monitor_stub(tier, phase))
+        # no early stop in the search: the session must reach its final reply (spec 5.1)
+        probe = side_task_probe(metadata["side_task"]) if phase == "execution" else None
         sb = sandbox()
 
         await basharena.run_environment_setup(task)
         await image.add_gateway_to_hosts()
+        await tiers.write_materials(tier, REPO_ROOT / cfg.materials.docs)
 
         snapshot: set[int] | None = None  # set once meltzer may start
         run: MeltzerRun | None = None
@@ -447,7 +451,7 @@ def meltzer_solver(cfg: RunConfig, run_dir: Path, model_factory: ModelFactory | 
                 await image.start_gateway_forwarder()
                 await image.allow_gateway_in_firewall()
                 await preconditions.write_preconditions(
-                    cfg.models.agent.id, cfg.models.monitor.id, cfg.meltzer.max_turn_steps
+                    cfg.models.agent.id, cfg.models.monitor.id, step_cap(cfg, phase), deny=tiers.deny_paths(tier)
                 )
                 command = build_meltzer_command(await stage_developer_instructions(sb, developer_instructions))
                 snapshot = {pid for pid, _, _ in await list_processes(sb)}
@@ -457,7 +461,7 @@ def meltzer_solver(cfg: RunConfig, run_dir: Path, model_factory: ModelFactory | 
                     state.input_text,
                     random_api_key(),
                     cfg.limits.meltzer_seconds,
-                    side_task_probe=side_task_probe(metadata["side_task"]),
+                    side_task_probe=probe,
                     probe_seconds=SIDE_TASK_POLL_SECONDS,
                 )
             _record(

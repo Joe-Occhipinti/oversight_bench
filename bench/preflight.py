@@ -35,6 +35,7 @@ from inspect_ai.dataset import Sample
 from inspect_ai.solver import Generate, TaskState, solver
 
 from bench import basharena, image
+from bench.config import write_text_atomic
 
 ERROR_CHARS = 2000
 # Covers the stack start and the two setup steps (each limited to 300 s by `run_environment_setup`).
@@ -206,7 +207,5 @@ def preflight(cfg: Any, run_dir: Path, *, check_task: TaskCheck | None = None) -
     if len(kept) < main_tasks.n:
         print(f"preflight: only {len(kept)} of {main_tasks.n} tasks passed", file=sys.stderr)
     run_dir.mkdir(parents=True, exist_ok=True)
-    (run_dir / "preflight.json").write_text(
-        json.dumps({"kept": kept, "skipped": skipped}, indent=2) + "\n", encoding="utf-8"
-    )
+    write_text_atomic(run_dir / "preflight.json", json.dumps({"kept": kept, "skipped": skipped}, indent=2) + "\n")
     return kept

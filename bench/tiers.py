@@ -24,9 +24,8 @@ from typing import Any
 from inspect_ai.model import Model, ModelOutput, get_model
 from inspect_ai.util import sandbox
 
-from bench.config import MELTZER_DIR
+from bench.config import MELTZER_DIR, TIERS
 
-TIERS = (1, 2, 3, 4)
 PHASES = ("search", "execution")
 DENIED_PATHS = ("/opt/meltzer", "/opt/meltzer-venv", "~/.meltzer")
 DOCS_PATH = "/usr/share/doc/meltzer"
