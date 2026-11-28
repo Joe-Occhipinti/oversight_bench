@@ -45,7 +45,7 @@ from meltzer.mcp.config import parse_mcp_servers
 from meltzer.mcp.manager import McpManager
 from meltzer.network.policy import NetworkApprovals, NetworkPolicy
 from meltzer.memories import memory_instructions, update_memories
-from meltzer.monitor.review import MonitorReviewer
+from meltzer.monitor.review import MonitorReviewer, RejectionCircuitBreaker
 from meltzer.notify import Notifier
 from meltzer.plugins.loader import load_plugins
 from meltzer.sandbox.grants import GrantStore
@@ -88,6 +88,8 @@ UNIFIED_EXEC_LINES = (
     "the program reads input. `write_stdin` sends characters to that session; empty `chars` waits for "
     "more output.\n"
 )
+# The result of a tool call that did not run because the turn was interrupted.
+ABORTED_TOOL_CALL = "aborted"
 
 
 def base_instructions(unified_exec: bool) -> str:
@@ -166,6 +168,10 @@ class Session:
         self._after_tool_calls: list[Callable[[], None]] = []
         # Set by stop_turn(); the turn ends after the current batch of tool calls.
         self._stop_reason: str | None = None
+        # Set by interrupt_turn(); the turn ends after the current tool call.
+        self._interrupt_reason: str | None = None
+        # Denials of automatic review in the current turn (see meltzer.monitor.review).
+        self.rejection_breaker = RejectionCircuitBreaker()
         # Token usage of the last model response that reported it (see get_context_remaining).
         self.last_usage: Usage | None = None
         self.settings = ApprovalSettings(policy=config.approval_policy, reviewer=config.approvals_reviewer)
@@ -424,6 +430,13 @@ class Session:
         """End the current turn, with `reason` as its final message, after the current batch of tool calls."""
         self._stop_reason = reason
 
+    def interrupt_turn(self, reason: str) -> None:
+        """End the current turn, with `reason` as its final message, after the current tool call.
+
+        The other tool calls of the same model response do not run, and Stop hooks do not run.
+        """
+        self._interrupt_reason = reason
+
     def refresh_environment(self) -> None:
         """Add an environment item if the session's sandbox policy changed since the last one was added."""
         item = environment_update(self.history, self.orchestrator.sandbox, self.settings)
@@ -476,7 +489,8 @@ class Session:
     def run_turn(self, prompt: str, source: str | None = None) -> str:
         """Add a user message and run the model until it answers without tool calls.
 
-        The turn also ends after `max_turn_steps` model requests. If it is
+        The turn also ends after `max_turn_steps` model requests, or when
+        automatic review interrupts it (interrupt_turn). If it is
         interrupted (KeyboardInterrupt), tool calls without a result get one and
         pending history updates (plan, compaction) are applied, so the history
         stays valid and in step with the plan for the next turn. UserPromptSubmit
@@ -495,14 +509,18 @@ class Session:
         for item in mentioned_skill_items(self.skills.enabled(), prompt, self.ui.info):
             self._append(item)
         self._stop_reason = None
+        self._interrupt_reason = None
+        self.rejection_breaker.clear_turn()
         try:
             final = self._run_steps()
-            final = self._run_stop_hooks(final)
+            if self._interrupt_reason is None:
+                final = self._run_stop_hooks(final)
         except KeyboardInterrupt:
             self._close_open_tool_calls("interrupted by the user")
             self._run_after_tool_calls()
             raise
         finally:
+            self.rejection_breaker.clear_turn()
             self.grants.end_turn()
             self.telemetry.flush()
         self._finish_turn(prompt, final)
@@ -520,12 +538,17 @@ class Session:
             if response.content:
                 self.ui.assistant_message(response.content)
             for call in response.tool_calls:
+                if self._interrupt_reason is not None:
+                    self._append(Item.tool_result(call.id, call.name, ABORTED_TOOL_CALL))
+                    continue
                 self.ui.tool_call(call.name, call.arguments)
                 started = time.monotonic()
                 output = self._run_tool(call.name, call.arguments)
                 self.telemetry.tool_result(call.name, success=output.success, duration=time.monotonic() - started)
                 self._append(Item.tool_result(call.id, call.name, output.text))
             self._run_after_tool_calls()
+            if self._interrupt_reason is not None:
+                return self._interrupt_reason
             if self._stop_reason is not None:
                 reason, self._stop_reason = self._stop_reason, None
                 return reason

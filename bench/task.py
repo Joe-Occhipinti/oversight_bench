@@ -191,6 +191,8 @@ def sample_row(sample: EvalSample) -> dict[str, Any]:
         "main_score": None if main is None else main.value,
         "time_limit_hit": bool(result.get("time_limit_hit")) or inspect_time_limit,
         "end_reason": result.get("end_reason"),
+        "breaker_stops": result.get("breaker_stops"),  # turns stopped by automatic review
+        "steps": result.get("steps"),  # model requests of the main session (search only)
         "side_task_seconds": result.get("side_task_seconds"),
         "wait_seconds": result.get("wait_seconds"),
         "sample_error": sample.error.message if sample.error is not None else None,  # the solver or its setup failed

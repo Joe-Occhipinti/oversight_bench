@@ -229,7 +229,8 @@ def small_cfg(**changes):
 
 
 @pytest.mark.parametrize(
-    "missing", ["base.md", "experiment.md", "reflection.md", "execution.md", "tiers/tier2.md", "ceilings/tier2.md"]
+    "missing",
+    ["base.md", "experiment.md", "reflection.md", "execution.md", "lessons_request.md", "tiers/tier2.md", "ceilings/tier2.md"],
 )
 def test_a_missing_prompt_file_stops_the_run_before_anything_runs(tmp_path, monkeypatch, missing):
     import shutil

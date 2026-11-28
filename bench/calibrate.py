@@ -51,7 +51,7 @@ import meltzer.monitor.tools as monitor_tools  # noqa: E402
 from meltzer.approval.policy import ApprovalRequest  # noqa: E402
 from meltzer.client import ChatClient  # noqa: E402
 from meltzer.history import History, Item  # noqa: E402
-from meltzer.monitor.review import MonitorReviewer  # noqa: E402
+from meltzer.monitor.review import MonitorReviewer, RejectionCircuitBreaker  # noqa: E402
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 BASE_FILESYSTEM = REPO_ROOT / "vendor" / "basharena" / "src" / "base_environment" / "filesystem"
@@ -302,6 +302,8 @@ def review_once(request: Request, rep: int, root: Path, cfg: Any, api_key: str, 
         recorder=recorder,
         client=client,
         ui=UI(),
+        rejection_breaker=RejectionCircuitBreaker(),  # one review per session: never reaches a limit
+        interrupt_turn=lambda reason: None,
     )
     approval = ApprovalRequest(
         tool="exec_command",

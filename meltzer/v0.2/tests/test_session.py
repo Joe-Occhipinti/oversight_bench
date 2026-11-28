@@ -12,7 +12,7 @@ import pytest
 from meltzer import cli
 from meltzer.approval.policy import ApprovalRequest
 from conftest import ScriptedClient
-from meltzer.client import ModelResponse
+from meltzer.client import ModelResponse, ToolCall
 from meltzer.config import ConfigError, load_config
 from meltzer.history import Item, Kind
 from meltzer.sandbox.grants import Grant, GrantScope
@@ -275,3 +275,78 @@ def test_environment_item_is_added_again_when_grants_change(make_session, tmp_pa
 def test_tool_calls_reach_hooks_with_their_arguments(make_session):
     arguments = '{"plan": []}'
     assert make_session().tools.hook_input("update_plan", arguments) == arguments
+
+
+# --- denials of automatic review ---------------------------------------------------------------
+
+DENY_VERDICT = ModelResponse(
+    content='{"risk_level": "high", "user_authorization": "unknown", "outcome": "deny", "rationale": "not needed"}'
+)
+STOPPED = "Stopped: automatic review rejected too many approval requests for this turn (3 consecutive, 3 in the last 50 reviews)."
+
+
+def escalated(*call_ids: str) -> ModelResponse:
+    arguments = json.dumps({"cmd": "touch /etc/motd", "escalate": True, "justification": "update the banner"})
+    return ModelResponse(content=None, tool_calls=[ToolCall(call_id, "exec_command", arguments) for call_id in call_ids])
+
+
+@pytest.fixture
+def monitored(session_factory):
+    def make(**kwargs) -> Session:
+        return session_factory(("approval_policy", "on-request"), ("approvals_reviewer", "monitor"), **kwargs)
+
+    return make
+
+
+def test_three_denials_in_a_row_end_the_turn(monitored):
+    session = monitored()
+    session.client = ScriptedClient(
+        escalated("t1"), DENY_VERDICT, escalated("t2"), DENY_VERDICT, escalated("t3", "t4"), DENY_VERDICT
+    )
+    assert session.run_turn("update the login banner") == STOPPED
+    assert len(session.client.calls) == 6  # no model request after the third denial
+    results = {item.call_id: item.content for item in session.history if item.kind == Kind.TOOL_RESULT}
+    assert results["t4"] == "aborted" and "not needed" in results["t3"]
+    assert session.run_turn("leave it as it is") == "done"  # the next turn runs
+
+
+def test_denials_count_per_turn(monitored):
+    session = monitored()
+    session.client = ScriptedClient(
+        escalated("t1"), DENY_VERDICT, escalated("t2"), DENY_VERDICT, ModelResponse(content="cannot do it"),
+        escalated("t3"), DENY_VERDICT, ModelResponse(content="still cannot"),
+    )  # fmt: skip
+    assert session.run_turn("update the login banner") == "cannot do it"
+    assert session.run_turn("try once more") == "still cannot"
+
+
+def test_each_session_counts_its_own_denials(monitored):
+    session = monitored()
+    subagent = session.start_subagent()
+    try:
+        session.rejection_breaker.record_denial()
+        session.rejection_breaker.record_denial()
+        subagent.client = ScriptedClient(DENY_VERDICT)
+        request = ApprovalRequest(tool="exec_command", cwd=subagent.root, command="touch /etc/motd", escalate=True)
+        assert not subagent.reviewer.review(request).approved
+        assert (subagent.rejection_breaker.consecutive_denials, session.rejection_breaker.consecutive_denials) == (1, 2)
+    finally:
+        subagent.close()
+
+
+def test_exec_prints_a_stop_line_and_exec_resume_continues(home, work, monkeypatch, capsys):
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    client = ScriptedClient(escalated("t1"), DENY_VERDICT, escalated("t2"), DENY_VERDICT, escalated("t3"), DENY_VERDICT)
+    monkeypatch.setattr("meltzer.session.ChatClient", lambda *args, **kwargs: client)
+    options = ["-C", str(work), "-a", "on-request", "-c", 'approvals_reviewer="monitor"']
+    assert cli.main(["exec", *options, "update the login banner"]) == cli.EXIT_OK
+    out = capsys.readouterr()
+    assert out.out.strip() == STOPPED
+    assert "interrupting the turn" in out.err
+    (path,) = (home / ".meltzer" / "sessions").rglob("*.jsonl")
+    lines = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [r["consecutive_denials"] for r in lines if r["type"] == "turn_interrupted"] == [3]
+
+    assert cli.main(["exec", "resume", *options, lines[0]["id"], "leave it as it is"]) == cli.EXIT_OK
+    assert capsys.readouterr().out.strip() == "done"

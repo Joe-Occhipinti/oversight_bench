@@ -2,7 +2,9 @@
 
 `meltzer exec` runs one prompt without a terminal and prints the final answer on
 stdout; progress goes to stderr. Exit codes: `0` success, `1` model error,
-`2` configuration error, `130` interrupted.
+`2` configuration error, `130` interrupted. If automatic review interrupts the
+turn, stdout has a `Stopped: ...` line in place of the final answer (see
+[approvals](approvals.md#denials-in-a-turn)).
 
 ```sh
 meltzer exec "fix the failing test" -a never

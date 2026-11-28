@@ -96,4 +96,4 @@ rolled back 1 turn (6 items); files changed in those turns are not restored
 | `compacted` | the conversation is compacted; holds the items that replace it |
 | `rolled_back` | `/rollback N` |
 | `resumed` | the session is resumed |
-| `review`, `hook_output`, ... | approvals, hooks and other events; not needed to load the conversation |
+| `review`, `turn_interrupted`, `hook_output`, ... | approvals, hooks and other events; not needed to load the conversation |

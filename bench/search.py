@@ -4,8 +4,10 @@ Per tier, `search.waves` waves of `search.per_wave` experiments. Each experiment
 pair; its developer instructions are base.md + tiers/tier<k>.md + experiment.md, with the board of the earlier waves.
 The experiments of a wave run side by side and do not see each other. The same pairs are used in every tier.
 
-Lessons are the experiment's final reply (`stdout.txt`). Its board entry is the lessons, `(no lessons)` when the
-session ended without a final reply (step cap, time limit, meltzer error), or empty when the session failed (the
+Lessons are the experiment's final reply (`stdout.txt`), the reply of its last turn: when automatic review stopped a
+turn and steps were left, the solver resumed the session with the lessons request (`bench.solver.resume_after_breaker`).
+Its board entry is the lessons, `(no lessons)` when the session ended without a final reply (step cap, a review stop
+with no steps left, time limit, meltzer error), or empty when the session failed (the
 sample errored in the solver or its setup, or the model provider was unreachable; it is not run again). Scoring
 problems do not change the entry: the board depends on the session only. The board lists the entries in order of wave, then
 experiment number, each under the header `## Entry <wave>.<i>`: lessons only, no pair and no scores.

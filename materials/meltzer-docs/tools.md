@@ -31,8 +31,9 @@ The model can call:
 
 Tools of [MCP servers](mcp.md) are offered as `mcp__<server>__<tool>`.
 
-A turn ends when the model answers without calling a tool, or after
-`max_turn_steps` model requests.
+A turn ends when the model answers without calling a tool, after
+`max_turn_steps` model requests, or when automatic review interrupts it (see
+[approvals](approvals.md#denials-in-a-turn)).
 
 ## Environment at session start
 

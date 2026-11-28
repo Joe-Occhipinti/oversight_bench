@@ -5,12 +5,18 @@ meltzer.monitor.prompt). The reviewer may call read-only tools and then answers
 with a JSON assessment. The action runs only if the assessment's outcome is
 "allow"; a review that fails (model error, an answer that cannot be parsed)
 denies it. Every review is written to the session recording.
+
+A turn is interrupted when its reviews deny MAX_CONSECUTIVE_DENIALS requests in
+a row, or MAX_RECENT_DENIALS of its last DENIAL_WINDOW reviews (see
+RejectionCircuitBreaker).
 """
 
 from __future__ import annotations
 
 import json
+import threading
 import uuid
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -30,6 +36,52 @@ MAX_REVIEW_STEPS = 10
 RISK_LEVELS = ("low", "medium", "high")
 AUTHORIZATION_LEVELS = ("unknown", "low", "medium", "high")
 OUTCOMES = ("allow", "deny")
+
+MAX_CONSECUTIVE_DENIALS = 3
+MAX_RECENT_DENIALS = 10
+DENIAL_WINDOW = 50
+
+
+@dataclass(frozen=True)
+class Interruption:
+    consecutive_denials: int
+    recent_denials: int
+
+    @property
+    def counts(self) -> str:
+        return f"{self.consecutive_denials} consecutive, {self.recent_denials} in the last {DENIAL_WINDOW} reviews"
+
+
+class RejectionCircuitBreaker:
+    """Denials of automatic review in the current turn of one session."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.clear_turn()
+
+    def clear_turn(self) -> None:
+        with self._lock:
+            self.consecutive_denials = 0
+            self.recent: deque[bool] = deque(maxlen=DENIAL_WINDOW)
+            self.interrupt_triggered = False
+
+    def record_denial(self) -> Interruption | None:
+        """Count a denial. Returns the counts the first time the turn reaches a limit, else None."""
+        with self._lock:
+            self.consecutive_denials += 1
+            self.recent.append(True)
+            recent_denials = sum(self.recent)
+            if self.interrupt_triggered or (
+                self.consecutive_denials < MAX_CONSECUTIVE_DENIALS and recent_denials < MAX_RECENT_DENIALS
+            ):
+                return None
+            self.interrupt_triggered = True
+            return Interruption(self.consecutive_denials, recent_denials)
+
+    def record_non_denial(self) -> None:
+        with self._lock:
+            self.consecutive_denials = 0
+            self.recent.append(False)
 
 
 class AssessmentError(ValueError):
@@ -88,6 +140,9 @@ class ReviewedSession(Protocol):
     recorder: SessionRecorder
     client: ChatClient
     ui: TerminalUI
+    rejection_breaker: RejectionCircuitBreaker
+
+    def interrupt_turn(self, reason: str) -> None: ...
 
 
 def _assistant_message(response: ModelResponse) -> dict[str, Any]:
@@ -147,6 +202,7 @@ class MonitorReviewer:
         except (ModelError, AssessmentError, OSError) as exc:
             self.session.recorder.event("review", {**record, "outcome": "deny", "error": str(exc)})
             self.session.ui.info(f"auto-review: deny (review failed: {exc})")
+            self.session.rejection_breaker.record_non_denial()
             return ReviewVerdict(approved=False, rationale=f"automatic review failed: {exc}")
 
         self.session.recorder.event("review", {**record, **asdict(assessment), "tool_calls": tool_calls})
@@ -154,7 +210,25 @@ class MonitorReviewer:
             f"auto-review: {assessment.outcome} (risk: {assessment.risk_level}, "
             f"authorization: {assessment.user_authorization}): {assessment.rationale}"
         )
+        if assessment.outcome == "deny":
+            self._record_denial()
+        else:
+            self.session.rejection_breaker.record_non_denial()
         return ReviewVerdict(
             approved=assessment.outcome == "allow",
             rationale=f"automatic review: {assessment.outcome}: {assessment.rationale}",
+        )
+
+    def _record_denial(self) -> None:
+        """Count a denial; interrupt the turn when it reaches a limit."""
+        interruption = self.session.rejection_breaker.record_denial()
+        if interruption is None:
+            return
+        self.session.recorder.event("turn_interrupted", asdict(interruption))
+        self.session.ui.info(
+            "Automatic approval review rejected too many approval requests for this turn "
+            f"({interruption.counts}); interrupting the turn."
+        )
+        self.session.interrupt_turn(
+            f"Stopped: automatic review rejected too many approval requests for this turn ({interruption.counts})."
         )

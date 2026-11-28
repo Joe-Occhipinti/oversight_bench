@@ -144,6 +144,10 @@ def test_lessons_are_the_final_reply_unchanged(tmp_path):
     "stdout, row, expected",
     [
         ("Stopped: the turn reached max_turn_steps (40 model requests).\n", {"end_reason": "max_turn_steps"}, "(no lessons)"),
+        (
+            "Stopped: automatic review rejected too many approval requests for this turn (3 consecutive, 3 in the last "
+            "50 reviews).\n", {"end_reason": "circuit_breaker"}, "(no lessons)",
+        ),  # no step was left to resume it
         ("", {"end_reason": "time_limit", "exit_code": 130, "time_limit_hit": True}, "(no lessons)"),
         (None, {"end_reason": "final_answer"}, "(no lessons)"),
         ("   \n", {"end_reason": "final_answer"}, "(no lessons)"),

@@ -6,10 +6,12 @@ Prompt folder (`prompts.dir` of the run config):
     experiment.md        {board} {step_cap}
     reflection.md        {board}
     execution.md         {strategy}
+    lessons_request.md   {steps_left}
     tiers/tier<k>.md     what the agent can access in tier k
     ceilings/tier<k>.md  the designer text used in place of the strategy in ceiling k
 
 Developer instructions of a role: base.md, then tiers/tier<k>.md, then the role file, separated by blank lines.
+The lessons request is the prompt of a resumed experiment turn (spec 5.1), not developer instructions.
 The reflection's base has no own pair: every line of base.md that holds `{own_side_task}` is left out.
 
 Templates are filled with a single regex pass over the template text, not str.format, so literal braces in a
@@ -25,6 +27,8 @@ from pathlib import Path
 ROLES = ("experiment", "execution", "reflection")
 # The placeholders each role file is filled with.
 ROLE_VALUES = {"experiment": ("board", "step_cap"), "execution": ("strategy",), "reflection": ("board",)}
+LESSONS_REQUEST = "lessons_request.md"
+STEPS_LEFT_PLACEHOLDER = "{steps_left}"
 OWN_PLACEHOLDER = "{own_side_task}"
 OWN_MARK = " (yours)"  # after the agent's own side task in {side_tasks}
 
@@ -80,6 +84,16 @@ def tier_text(prompts_dir: Path, tier: int) -> str:
 
 def ceiling_text(prompts_dir: Path, tier: int) -> str:
     return _read(Path(prompts_dir) / "ceilings" / f"tier{tier}.md")
+
+
+def render_lessons_request(prompts_dir: Path, steps_left: int) -> str:
+    """The prompt of a resumed experiment turn: lessons_request.md with the steps left. The file must hold the
+    `{steps_left}` slot."""
+    path = Path(prompts_dir) / LESSONS_REQUEST
+    text = _read(path)
+    if STEPS_LEFT_PLACEHOLDER not in text:
+        raise ValueError(f"{path} has no {STEPS_LEFT_PLACEHOLDER} slot")
+    return _fill(text, {"steps_left": str(steps_left)})
 
 
 def render_instructions(prompts_dir: Path, tier: int, role: str, base: str, **values: object) -> str:

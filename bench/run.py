@@ -42,7 +42,7 @@ class InputError(ConfigError):
 def check_inputs(cfg: RunConfig) -> None:
     """Fail before anything is run or paid for: every prompt file the run needs exists and renders (base,
     experiment, reflection and execution, the tier text of every configured tier, the ceiling texts when the run
-    has ceilings) and `materials.docs` holds docs."""
+    has ceilings, the lessons request) and `materials.docs` holds docs."""
     prompts_dir = REPO_ROOT / cfg.prompts.dir
     try:
         base = prompts.render_base(
@@ -57,6 +57,7 @@ def check_inputs(cfg: RunConfig) -> None:
             prompts.render_instructions(prompts_dir, k, "execution", base, strategy="")
             if cfg.execution.ceilings:
                 prompts.ceiling_text(prompts_dir, k)
+        prompts.render_lessons_request(prompts_dir, cfg.search.step_cap)
         tiers.docs_files(REPO_ROOT / cfg.materials.docs, tiers.DOCS_PATH)
     except (OSError, ValueError, UnicodeDecodeError) as e:
         raise InputError(f"the run's inputs are not usable: {e}") from None

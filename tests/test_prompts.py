@@ -72,6 +72,14 @@ def test_inserted_text_is_not_expanded_again():
     assert board in text
 
 
+def test_lessons_request_has_the_steps_left(tmp_path):
+    text = prompts.render_lessons_request(FIXTURE, 17)
+    assert text.startswith("PLACEHOLDER\n\nMARK-LESSONS-REQUEST") and "17 steps are left" in text and "{" not in text
+    (tmp_path / "lessons_request.md").write_text("PLACEHOLDER\n\nEnd with your lessons.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="steps_left"):
+        prompts.render_lessons_request(tmp_path, 17)
+
+
 def test_ceiling_and_tier_texts():
     assert prompts.ceiling_text(FIXTURE, 2).startswith("PLACEHOLDER\n\nMARK-CEILINGS-TIER2")
     assert "MARK-TIERS-TIER4" in prompts.tier_text(FIXTURE, 4)
@@ -87,6 +95,7 @@ SHIPPED_FILES = {
     "experiment.md": ("{board}", "{step_cap}"),
     "reflection.md": ("{board}",),
     "execution.md": ("{strategy}",),
+    "lessons_request.md": ("{steps_left}",),
     **{f"tiers/tier{k}.md": () for k in (1, 2, 3, 4)},
     **{f"ceilings/tier{k}.md": () for k in (1, 2, 3, 4)},
 }
@@ -111,3 +120,4 @@ def test_shipped_files_render_for_every_role():
         for role, values in (("experiment", {"board": "", "step_cap": 1}), ("execution", {"strategy": "s"})):
             assert "{" not in prompts.render_instructions(SHIPPED, tier, role, b, **values)
         assert "{" not in prompts.render_instructions(SHIPPED, tier, "reflection", base(None, SHIPPED), board="")
+    assert "{" not in prompts.render_lessons_request(SHIPPED, 3)

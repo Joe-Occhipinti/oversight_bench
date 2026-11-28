@@ -15,7 +15,14 @@ from meltzer.config import load_config
 from meltzer.config.schema import Config
 from meltzer.history import History, Item, Kind, Role, SessionRecorder
 from meltzer.monitor.prompt import REQUEST_END, REQUEST_START, TRANSCRIPT_END, TRANSCRIPT_START
-from meltzer.monitor.review import AssessmentError, MonitorReviewer, parse_assessment
+from meltzer.monitor.review import (
+    DENIAL_WINDOW,
+    AssessmentError,
+    Interruption,
+    MonitorReviewer,
+    RejectionCircuitBreaker,
+    parse_assessment,
+)
 from meltzer.monitor.transcript import NO_ENTRIES, render_transcript, transcript_entries
 from meltzer.sandbox.policy import SandboxMode, SandboxPolicy
 from meltzer.ui import TerminalUI
@@ -154,6 +161,11 @@ class FakeSession:
     client: ScriptedClient
     history: History = field(default_factory=History)
     ui: TerminalUI = field(default_factory=lambda: TerminalUI(interactive=False, stderr=io.StringIO()))
+    rejection_breaker: RejectionCircuitBreaker = field(default_factory=RejectionCircuitBreaker)
+    interrupted: list[str] = field(default_factory=list)
+
+    def interrupt_turn(self, reason: str) -> None:
+        self.interrupted.append(reason)
 
 
 @pytest.fixture
@@ -290,3 +302,94 @@ def test_agents_md_is_sent_only_when_the_policy_can_read_it(make_session):
     assert len(second) == 2 and all("token=abc" not in message["content"] for message in second)
     assert load_agents_md(session.root, session.policy.can_read) is None
     assert load_agents_md(session.root) is not None
+
+
+# --- denials per turn ---------------------------------------------------------------------
+
+
+def test_breaker_interrupts_after_three_consecutive_denials():
+    breaker = RejectionCircuitBreaker()
+    assert breaker.record_denial() is None
+    assert breaker.record_denial() is None
+    assert breaker.record_denial() == Interruption(consecutive_denials=3, recent_denials=3)
+    assert breaker.record_denial() is None  # once per turn
+
+
+def test_breaker_resets_consecutive_denials_on_a_non_denial():
+    breaker = RejectionCircuitBreaker()
+    assert breaker.record_denial() is None
+    breaker.record_non_denial()
+    assert breaker.record_denial() is None
+    assert breaker.record_denial() is None
+    assert breaker.record_denial() == Interruption(consecutive_denials=3, recent_denials=4)
+
+
+def test_breaker_interrupts_after_ten_recent_denials():
+    breaker = RejectionCircuitBreaker()
+    for _ in range(9):
+        assert breaker.record_denial() is None
+        breaker.record_non_denial()
+    assert breaker.record_denial() == Interruption(consecutive_denials=1, recent_denials=10)
+
+
+def test_breaker_forgets_denials_outside_the_recent_reviews():
+    breaker = RejectionCircuitBreaker()
+    for _ in range(9):
+        assert breaker.record_denial() is None
+        breaker.record_non_denial()
+    for _ in range(DENIAL_WINDOW - 18):
+        breaker.record_non_denial()
+    assert breaker.record_denial() is None
+
+
+def test_breaker_starts_each_turn_without_denials():
+    breaker = RejectionCircuitBreaker()
+    breaker.record_denial()
+    breaker.record_denial()
+    breaker.clear_turn()
+    assert breaker.record_denial() is None
+    assert breaker.record_denial() is None
+    assert breaker.record_denial() is not None
+    breaker.clear_turn()
+    assert breaker.record_denial() is None
+
+
+STOPPED = "Stopped: automatic review rejected too many approval requests for this turn (3 consecutive, 3 in the last 50 reviews)."
+
+
+def records(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_third_denial_in_a_row_interrupts_the_turn(make_session):
+    session = make_session(answer(DENY), answer(DENY), answer(DENY))
+    reviewer = MonitorReviewer(session)
+    for _ in range(2):
+        assert not reviewer.review(request(session.root)).approved
+    assert session.interrupted == []
+    assert not reviewer.review(request(session.root)).approved
+    assert session.interrupted == [STOPPED]
+    assert (
+        "Automatic approval review rejected too many approval requests for this turn "
+        "(3 consecutive, 3 in the last 50 reviews); interrupting the turn."
+    ) in session.ui.stderr.getvalue()
+    (event,) = [r for r in records(session.recorder.path) if r["type"] == "turn_interrupted"]
+    assert (event["consecutive_denials"], event["recent_denials"]) == (3, 3)
+
+
+def test_approval_resets_the_denials_in_a_row(make_session):
+    session = make_session(answer(DENY), answer(DENY), answer(ALLOW), answer(DENY), answer(DENY))
+    reviewer = MonitorReviewer(session)
+    for _ in range(5):
+        reviewer.review(request(session.root))
+    assert session.interrupted == []
+    assert session.rejection_breaker.consecutive_denials == 2
+
+
+def test_failed_review_is_not_counted_as_a_denial(make_session):
+    session = make_session(answer(DENY), answer(DENY), ModelError("HTTP 500"), answer(DENY))
+    reviewer = MonitorReviewer(session)
+    verdicts = [reviewer.review(request(session.root)) for _ in range(4)]
+    assert not any(v.approved for v in verdicts)
+    assert session.interrupted == []
+    assert session.rejection_breaker.consecutive_denials == 1
