@@ -153,6 +153,20 @@ def tool_names(session: Session) -> list[str]:
     return [spec["function"]["name"] for spec in session.tools.specs()]
 
 
+@pytest.mark.parametrize(
+    "unified_exec, offered, absent",
+    [(True, {"exec_command", "write_stdin"}, {"shell"}), (False, {"shell"}, {"exec_command", "write_stdin"})],
+)
+def test_one_set_of_command_tools(session_factory, unified_exec, offered, absent):
+    session = session_factory(("features.unified_exec", unified_exec))
+    names = set(tool_names(session))
+    assert offered <= names and not absent & names
+    tools_section = session.instructions.split("# Tools\n")[1].split("\n# ")[0]
+    assert all(f"`{name}`" in tools_section for name in offered)
+    assert not any(f"`{name}`" in tools_section for name in absent)
+    assert "<command tools>" not in session.instructions
+
+
 def test_subagent_has_its_own_grants_and_no_agent_tools(make_session):
     session = make_session()
     child = session.start_subagent()

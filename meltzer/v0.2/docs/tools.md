@@ -2,11 +2,14 @@
 
 The model can call:
 
+- `exec_command` and `write_stdin`: run a command with `bash -c`, and send input
+  to one that keeps running between calls. See [interactive processes](exec.md).
+  Offered when `features.unified_exec` is true (the default).
 - `shell`: run a command with `bash -c`. Optional `workdir`, `background` (start
   and return at once; output goes to a log file under `~/.meltzer/logs/`),
-  `escalate` with a `justification` (ask to run outside the sandbox).
-- `exec_command` and `write_stdin`: run a command that keeps running between
-  calls, and send input to it. See [interactive processes](exec.md).
+  `escalate` with a `justification` (ask to run outside the sandbox). Offered
+  instead of `exec_command` and `write_stdin` when `features.unified_exec` is
+  false.
 - `apply_patch`: add, update, move or delete files with a patch. A patch is
   applied completely or not at all.
 - `update_plan`: keep a checklist of steps for the current task.

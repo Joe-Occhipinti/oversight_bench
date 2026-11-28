@@ -146,6 +146,8 @@ KEYS: tuple[ConfigKey, ...] = (
         "background_terminal_max_timeout", "background_terminal_max_timeout",
         DEFAULT_BACKGROUND_TERMINAL_MAX_TIMEOUT_MS, _positive_int,
     ),
+    # Command tools: exec_command and write_stdin when true, shell when false.
+    ConfigKey("features.unified_exec", "unified_exec", True, _bool),
     # Subagents.
     ConfigKey("agents.max_depth", "agents_max_depth", DEFAULT_AGENTS_MAX_DEPTH, _positive_int),
     ConfigKey("agents.max_threads", "agents_max_threads", DEFAULT_AGENTS_MAX_THREADS, _positive_int),
@@ -222,6 +224,7 @@ class Config:
     monitor_environment: str | None
     monitor_trusted_hosts: tuple[str, ...]
     background_terminal_max_timeout: int
+    unified_exec: bool
     agents_max_depth: int
     agents_max_threads: int
     agents_default_model: str | None

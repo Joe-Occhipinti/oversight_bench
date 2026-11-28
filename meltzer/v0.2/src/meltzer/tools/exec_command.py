@@ -32,8 +32,9 @@ EXEC_COMMAND_SPEC = ToolSpec(
     name="exec_command",
     description=(
         "Runs a command with `bash -c`, returning its output, or a session ID for ongoing "
-        "interaction if it is still running when the call returns. Commands run in the same "
-        "sandbox as `shell`. If a command needs more (network, writing outside the workspace), "
+        "interaction if it is still running when the call returns. Commands run in a sandbox: by "
+        "default the filesystem is read-only except the workspace and /tmp, and there is no network "
+        "access. If a command needs more (network, writing outside the workspace), "
         "set `escalate` to true and give a one-sentence `justification`; it then runs outside the "
         "sandbox if approved. Use `write_stdin` with the session ID to send input to the process "
         "or to read more of its output."

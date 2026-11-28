@@ -79,6 +79,7 @@ to `read`, `write` or `deny`), `network.enabled` (bool).
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `background_terminal_max_timeout` | integer | `300000` | longest wait, in milliseconds, of an empty `write_stdin` call ([exec](exec.md)) |
+| `features.unified_exec` | boolean | `true` | command tools: `exec_command` and `write_stdin` when true, `shell` when false ([tools](tools.md)) |
 | `agents.max_depth` | integer | `1` | how deep subagents can be nested ([agents](agents.md)) |
 | `agents.max_threads` | integer | `6` | subagents open at once |
 | `agents.default_model` | string | unset | model for subagents without a role model |

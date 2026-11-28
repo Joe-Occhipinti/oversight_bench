@@ -2,7 +2,9 @@
 
 The `exec_command` and `write_stdin` tools let the model run commands that keep
 running between tool calls: a dev server, a test watcher, a REPL, a database
-shell, or a program that asks questions on the terminal.
+shell, or a program that asks questions on the terminal. They are the model's
+command tools when `features.unified_exec` is true (the default); when it is
+false, the model gets `shell` instead ([tools](tools.md)).
 
 ## exec_command
 

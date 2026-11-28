@@ -74,8 +74,25 @@ from meltzer.ui import TerminalUI
 from meltzer.utils.git import git_info
 
 
-def base_instructions() -> str:
-    return resources.files("meltzer").joinpath("instructions.md").read_text(encoding="utf-8")
+# The line of instructions.md replaced by the description of the session's command tools.
+COMMAND_TOOLS_MARKER = "<command tools>\n"
+SHELL_TOOL_LINES = (
+    "- `shell` runs a command with `bash -c` and returns its exit code and output. Use it to read files "
+    "(`cat`, `sed -n`, `rg`), list directories, build, and run tests. With `background: true` it starts "
+    "a long-running process and returns at once.\n"
+)
+UNIFIED_EXEC_LINES = (
+    "- `exec_command` runs a command with `bash -c` and returns its exit code and output, or a session ID "
+    "if it is still running. Use it to read files (`cat`, `sed -n`, `rg`), list directories, build, and "
+    "run tests, and for dev servers, test watchers and programs that ask questions, with `tty: true` when "
+    "the program reads input. `write_stdin` sends characters to that session; empty `chars` waits for "
+    "more output.\n"
+)
+
+
+def base_instructions(unified_exec: bool) -> str:
+    text = resources.files("meltzer").joinpath("instructions.md").read_text(encoding="utf-8")
+    return text.replace(COMMAND_TOOLS_MARKER, UNIFIED_EXEC_LINES if unified_exec else SHELL_TOOL_LINES)
 
 
 def environment_section(policy: SandboxPolicy, settings: ApprovalSettings) -> str:
@@ -247,17 +264,18 @@ class Session:
                 self.runner = ProcessRunner(self.policy, log_dir=state_dir / "logs" / self.id)
                 self.runner.telemetry = self.telemetry
                 self.process_store = ProcessStore()
-            self.tools = ToolRegistry(
-                [
-                    ShellTool(self.root, self.orchestrator, self.runner, network=self.network_approvals),
+            # The model gets one set of command tools, as `features.unified_exec` selects.
+            if config.unified_exec:
+                command_tools = [
                     ExecCommandTool(
                         self.root, self.orchestrator, self.runner, self.process_store, self.id,
                         network=self.network_approvals,
                     ),
                     WriteStdinTool(self.process_store, config.background_terminal_max_timeout, self.id),
-                    ApplyPatchTool(self.root, self.orchestrator),
                 ]
-            )
+            else:
+                command_tools = [ShellTool(self.root, self.orchestrator, self.runner, network=self.network_approvals)]
+            self.tools = ToolRegistry([*command_tools, ApplyPatchTool(self.root, self.orchestrator)])
             # Subagents use their parent's MCP servers.
             if parent is not None:
                 self.mcp = parent.mcp
@@ -274,7 +292,7 @@ class Session:
             else:
                 self.client = parent.client
             self.history = History()
-            self.instructions = base_instructions() + "\n" + environment_section(self.policy, self.settings)
+            self.instructions = base_instructions(config.unified_exec) + "\n" + environment_section(self.policy, self.settings)
             catalog = render_catalog(self.skills.enabled()) if config.skills_include_instructions else ""
             if catalog:
                 self.instructions += "\n" + catalog + "\n"
