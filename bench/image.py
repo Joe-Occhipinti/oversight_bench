@@ -105,7 +105,7 @@ def ensure_images() -> tuple[str, str]:
     """Build the meltzer base image and the gateway image if missing; return `(meltzer, gateway)` names."""
     meltzer, gateway = meltzer_image_name(), gateway_image_name()
     if not _image_exists(meltzer):
-        # Context = repository root, so that `COPY meltzer/v0.1/` works; Dockerfile.dockerignore
+        # Context = repository root, so that `COPY meltzer/v0.2/` works; Dockerfile.dockerignore
         # (next to the Dockerfile) leaves only the meltzer tree in it.
         _build(meltzer, REPO_ROOT, MELTZER_DOCKERFILE)
     if not _image_exists(gateway):

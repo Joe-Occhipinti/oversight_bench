@@ -339,9 +339,7 @@ def cmd_plot_failures(args: argparse.Namespace) -> int:
 def cmd_check_registry(args: argparse.Namespace) -> int:
     from bench.registry_check import check_registry
 
-    problems = check_registry(
-        config.REPO_ROOT / "registry" / "v0.1" / "cards", config.REPO_ROOT / "meltzer" / "v0.1", "meltzer", "v0.1"
-    )
+    problems = check_registry(config.CARDS_DIR, config.MELTZER_DIR, "meltzer", config.MELTZER_VERSION)
     for p in problems:
         print(f"{p.card}: {p.message}")
     print(f"{len(problems)} problems")
@@ -411,7 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("config", help="path to a run YAML, e.g. runs/exp1-01.yaml")
     p.set_defaults(func=cmd_render_prompts)
 
-    p = sub.add_parser("check-registry", help="check that every card citation exists in meltzer/v0.1")
+    p = sub.add_parser("check-registry", help="check that every card citation exists in the meltzer tree")
     p.set_defaults(func=cmd_check_registry)
 
     return parser

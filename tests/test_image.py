@@ -159,7 +159,7 @@ def images() -> tuple[str, str]:
 
 @needs_docker
 def test_build_context_has_only_the_meltzer_tree(tmp_path):
-    """The Dockerfile.dockerignore leaves meltzer/v0.1 (without __pycache__) in the build context."""
+    """The Dockerfile.dockerignore leaves the meltzer tree (without __pycache__) in the build context."""
     dockerignore = image.MELTZER_DOCKERFILE.with_name("Dockerfile.dockerignore")
     (tmp_path / "probe.Dockerfile").write_text("FROM scratch\nCOPY . /ctx/\n")
     (tmp_path / "probe.Dockerfile.dockerignore").write_text(dockerignore.read_text())
@@ -169,9 +169,9 @@ def test_build_context_has_only_the_meltzer_tree(tmp_path):
         str(config.REPO_ROOT),
     )
     sent = {p.relative_to(out / "ctx").as_posix() for p in (out / "ctx").rglob("*") if p.is_file()}
-    tree = config.REPO_ROOT / "meltzer" / "v0.1"
+    tree = config.MELTZER_DIR
     expected = {
-        "meltzer/v0.1/" + p.relative_to(tree).as_posix()
+        f"meltzer/{config.MELTZER_VERSION}/" + p.relative_to(tree).as_posix()
         for p in tree.rglob("*")
         if p.is_file() and "__pycache__" not in p.parts
     }

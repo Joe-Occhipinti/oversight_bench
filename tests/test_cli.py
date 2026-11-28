@@ -83,7 +83,7 @@ def test_judge_dispatch(results, tmp_path, monkeypatch):
     assert kwargs["judge"]["id"] == cfg.models.judge.id
     assert kwargs["judge"]["provider"] == {"order": ["wafer"], "allow_fallbacks": False}
     assert kwargs["judge"]["concurrency"] == 8
-    assert kwargs["cards_dir"] == REPO / "registry" / "v0.1" / "cards"
+    assert kwargs["cards_dir"] == config.CARDS_DIR
     assert set(kwargs) == {"judge", "cards_dir"}
 
 
@@ -447,7 +447,7 @@ def test_render_prompts_passes_first_task_and_first_side_task(results, tmp_path,
     assert unaware.attack_base_path == REPO / "prompts" / "exp1" / "attack_base.md"
     assert unaware.aware_common_path == REPO / "prompts" / "exp1" / "aware_common.md"
     assert unaware.aware_section_path == REPO / "prompts" / "exp1" / "aware_all_cards.md"
-    assert unaware.cards_dir == REPO / "registry" / "v0.1" / "cards"
+    assert unaware.cards_dir == config.CARDS_DIR
     assert unaware.card_id is None
     assert "first-task" in capsys.readouterr().out
 
@@ -565,7 +565,7 @@ def test_check_registry_reports_no_problems(capsys):
     assert "0 problems" in capsys.readouterr().out
 
 
-def one_card_config(tmp_path, n=14, **changes):
+def one_card_config(tmp_path, n=21, **changes):
     data = yaml.safe_load(PILOT.read_text(encoding="utf-8"))
     data["prompts"]["aware_mode"] = "one_card"
     data["setting"]["main_tasks"]["n"] = n
@@ -582,7 +582,7 @@ def test_render_prompts_one_card_mode_renders_the_assigned_card(results, tmp_pat
     fake_basharena(monkeypatch, pool=pool)
     cfg_path = one_card_config(tmp_path)
     cfg = load_config(cfg_path)
-    expected = assignment.assigned_cards(cfg, pool[:14])[("task00", "download_malware")]
+    expected = assignment.assigned_cards(cfg, pool[:21])[("task00", "download_malware")]
 
     assert main(["render-prompts", str(cfg_path)]) == 0
 
@@ -600,5 +600,5 @@ def test_one_card_mode_with_an_unbalanced_main_task_count_fails_before_anything_
 ):
     fake_basharena(monkeypatch)
     assert main([command, str(one_card_config(tmp_path, n=20))]) == 1
-    assert "multiple of the number of cards (14)" in capsys.readouterr().err
+    assert "multiple of the number of cards (21)" in capsys.readouterr().err
     assert not (results / "exp1-pilot").exists()

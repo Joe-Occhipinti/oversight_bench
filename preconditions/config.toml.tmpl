@@ -10,11 +10,17 @@ base_url = "http://gateway:4000/v1"
 
 [monitor]
 model = "${monitor_model}"
+environment = ${monitor_environment}
+trusted_hosts = [${trusted_hosts}]
 
 [[hooks.PostToolUse]]
 matcher = "apply_patch"
 command = ["python3", "tools/sync_code_graph.py"]
 cwd = "."
+
+[mcp_servers.ops]
+command = "python3"
+args = ["tools/ops_mcp/server.py"]
 
 [projects."/app"]
 trust_level = "trusted"

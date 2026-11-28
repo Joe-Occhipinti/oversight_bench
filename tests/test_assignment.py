@@ -11,7 +11,7 @@ from bench import assignment, config
 ROOT = Path(__file__).resolve().parents[1]
 RUN_CONFIG = ROOT / "runs" / "exp1-01.yaml"
 SIDE_TASKS = ["download_malware", "leak_passwords", "disable_firewall", "sudo_edit"]
-CARDS = [f"E{i:02d}" for i in range(1, 15)]
+CARDS = [f"E{i:02d}" for i in range(1, 22)]  # the registry the bench runs
 
 
 def main_tasks(n):
@@ -41,14 +41,14 @@ def test_every_card_is_assigned_equally_often_within_each_side_task(n_cards, n_m
 
 
 def test_assignment_is_fixed_by_the_seed():
-    mains = main_tasks(28)
+    mains = main_tasks(42)
     first = assignment.assign_cards(CARDS, SIDE_TASKS, mains, seed=3)
     assert assignment.assign_cards(CARDS, SIDE_TASKS, mains, seed=3) == first
     assert assignment.assign_cards(CARDS, SIDE_TASKS, mains, seed=4) != first
 
 
 def test_assignment_does_not_depend_on_the_order_of_side_tasks_or_card_ids():
-    mains = main_tasks(14)
+    mains = main_tasks(21)
     first = assignment.assign_cards(CARDS, SIDE_TASKS, mains, seed=0)
     assert assignment.assign_cards(CARDS[::-1], SIDE_TASKS[::-1], mains, seed=0) == first
     assert assignment.assign_cards(CARDS, SIDE_TASKS[:2], mains, seed=0) == {
@@ -57,7 +57,7 @@ def test_assignment_does_not_depend_on_the_order_of_side_tasks_or_card_ids():
 
 
 def test_side_tasks_get_different_shuffles():
-    mains = main_tasks(14)
+    mains = main_tasks(21)
     assigned = assignment.assign_cards(CARDS, SIDE_TASKS, mains, seed=0)
     orders = {tuple(assigned[(m, s)] for m in mains) for s in SIDE_TASKS}
     assert len(orders) == len(SIDE_TASKS)
@@ -91,17 +91,17 @@ def test_check_config_follows_the_mode_and_the_conditions():
     one = with_prompts(cfg, aware_mode="one_card")
     with pytest.raises(config.ConfigError, match="multiple of the number of cards"):
         assignment.check_config(one)
-    assignment.check_config(with_main_tasks(one, 28))
+    assignment.check_config(with_main_tasks(one, 42))
     assignment.check_config(dataclasses.replace(one, conditions=("unaware",)))  # no aware samples, no cards
 
 
 def test_assigned_cards_of_a_run():
     cfg = config.load_config(RUN_CONFIG)
-    mains = main_tasks(28)
+    mains = main_tasks(42)
     assert assignment.assigned_cards(cfg, mains) == {}  # all_cards
-    one = with_main_tasks(with_prompts(cfg, aware_mode="one_card"), 28)
+    one = with_main_tasks(with_prompts(cfg, aware_mode="one_card"), 42)
     assigned = assignment.assigned_cards(one, mains)
-    assert len(assigned) == 28 * 4 and set(assigned.values()) == set(CARDS)
+    assert len(assigned) == 42 * 4 and set(assigned.values()) == set(CARDS)
     assert assigned == assignment.assign_cards(CARDS, one.setting.side_tasks, mains, one.seeds.card_assignment)
     assert assignment.assigned_cards(dataclasses.replace(one, conditions=("unaware",)), mains) == {}
     other_seed = dataclasses.replace(one, seeds=dataclasses.replace(one.seeds, card_assignment=1))

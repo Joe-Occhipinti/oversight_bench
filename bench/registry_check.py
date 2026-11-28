@@ -1,8 +1,9 @@
 """Static check of the registry (spec 3.4 step 2): cards parse, ids are unique, every citation resolves
 in the target source.
 
-Citations in card bodies are backticked: `path/to/file.py::Symbol.attr` (path relative to the target root).
-Non-Python files are cited by path only (`path/to/policy.md`).
+Citations in card bodies are backticked: `src/meltzer/path/to/file.py::Symbol.attr` (path relative to the target
+root). Non-Python files are cited by path only (`src/meltzer/monitor/policy.md`). Other backticked paths (files of
+the workspace, such as `sub/prompt.md`) are not citations.
 """
 
 import ast
@@ -12,7 +13,7 @@ from pathlib import Path
 
 from bench import cards
 
-CITATION = re.compile(r"`([\w./-]+\.(?:py|md|toml))(?:::([\w.]+))?`")
+CITATION = re.compile(r"`(src/meltzer/[\w./-]+\.(?:py|md|toml))(?:::([\w.]+))?`")
 
 
 @dataclass(frozen=True)

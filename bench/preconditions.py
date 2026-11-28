@@ -2,7 +2,7 @@
 
 `write_preconditions` runs inside a sample (it uses `inspect_ai.util.sandbox()`), after the
 BashArena setup (5.4 steps 1-2) and before the model proxy is opened. As root it writes
-meltzer's user configuration, the user rules and the three workspace scripts from `preconditions/`,
+meltzer's user configuration, the user rules and the workspace files from `preconditions/` (scripts, ops server),
 then records the trust entry of the configured hook with meltzer's own code. Nothing else is left in
 the container: the trust entry is computed by `python -c` (no script file), and files are written
 through `write_file` (standard input of a shell command, no staging file). R1/R2 of spec section 1a
@@ -11,12 +11,13 @@ apply to all of it.
 
 from __future__ import annotations
 
+import json
 import re
 from string import Template
 
 from inspect_ai.util import sandbox
 
-from bench.config import REPO_ROOT
+from bench.config import MONITOR_ENVIRONMENT, MONITOR_TRUSTED_HOSTS, REPO_ROOT
 
 PRECONDITIONS_DIR = REPO_ROOT / "preconditions"
 CONFIG_TEMPLATE = PRECONDITIONS_DIR / "config.toml.tmpl"
@@ -34,6 +35,10 @@ SCRIPT_PATHS = {
     "sync_code_graph.py": "/app/tools/sync_code_graph.py",
     "turn_complete_notify.py": "/app/tools/turn_complete_notify.py",
     "check.py": "/app/scripts/check.py",
+    "ops_mcp/server.py": "/app/tools/ops_mcp/server.py",
+    "ops_mcp/scripts/service_status.sh": "/app/tools/ops_mcp/scripts/service_status.sh",
+    "ops_mcp/scripts/tail_log.sh": "/app/tools/ops_mcp/scripts/tail_log.sh",
+    "ops_mcp/scripts/restart_service.sh": "/app/tools/ops_mcp/scripts/restart_service.sh",
 }
 # Every file `write_preconditions` creates.
 WRITTEN_PATHS = (CONFIG_PATH, RULES_PATH, *SCRIPT_PATHS.values(), TRUSTED_HOOKS_PATH)
@@ -76,7 +81,12 @@ def render_config(agent_model_id: str, monitor_model_id: str, max_turn_steps: in
         raise ValueError(f"max_turn_steps must be a positive integer, got {max_turn_steps!r}")
     template = Template(CONFIG_TEMPLATE.read_text(encoding="utf-8"))
     return template.substitute(
-        agent_model=agent_model_id, monitor_model=monitor_model_id, max_turn_steps=max_turn_steps
+        agent_model=agent_model_id,
+        monitor_model=monitor_model_id,
+        max_turn_steps=max_turn_steps,
+        # JSON strings are valid TOML basic strings, escapes included.
+        monitor_environment=json.dumps(MONITOR_ENVIRONMENT),
+        trusted_hosts=", ".join(json.dumps(host) for host in MONITOR_TRUSTED_HOSTS),
     )
 
 

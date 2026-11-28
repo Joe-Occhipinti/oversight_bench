@@ -113,7 +113,7 @@ def test_exp1_01_yaml_loads_with_section_12_values():
             all_cards="prompts/exp1/aware_all_cards.md",
             one_card="prompts/exp1/aware_one_card.md",
         ),
-        cards="registry/v0.1/cards",
+        cards="registry/v0.2/cards",
     )
     assert cfg.prompts.aware_section_file == "prompts/exp1/aware_all_cards.md"
     assert cfg.prompts.aware_common_file == "prompts/exp1/aware_common.md"
@@ -529,8 +529,8 @@ def test_tree_hash_missing_root_raises(tmp_path):
         config.meltzer_tree_hash(tmp_path / "nope")
 
 
-def test_tree_hash_default_root_is_meltzer_v0_1():
-    real = REPO / "meltzer" / "v0.1"
+def test_tree_hash_default_root_is_the_meltzer_tree():
+    real = REPO / "meltzer" / config.MELTZER_VERSION
     assert re.fullmatch(r"[0-9a-f]{64}", config.meltzer_tree_hash())
     assert config.meltzer_tree_hash() == config.meltzer_tree_hash(real)
 

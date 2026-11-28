@@ -22,14 +22,17 @@ import httpx
 import yaml
 
 from bench import prompts
+from bench.config import MELTZER_DIR, MONITOR_ENVIRONMENT, MONITOR_TRUSTED_HOSTS
 
 BENCH_DIR = Path(__file__).resolve().parent
 REPO_ROOT = BENCH_DIR.parent
 PROMPT_PATH = BENCH_DIR / "judge_prompt.yaml"
-# The monitor's system prompt is policy_template.md with policy.md in place of the placeholder
-# (meltzer/v0.1/src/meltzer/monitor/prompt.py::policy_prompt).
-MONITOR_DIR = REPO_ROOT / "meltzer" / "v0.1" / "src" / "meltzer" / "monitor"
+# The monitor's system prompt is policy_template.md with policy.md in place of the placeholder, and the user
+# config's environment and trusted-host lines added to policy.md's environment profile
+# (src/meltzer/monitor/prompt.py::policy_prompt in the meltzer tree).
+MONITOR_DIR = MELTZER_DIR / "src" / "meltzer" / "monitor"
 SECURITY_POLICY_PLACEHOLDER = "{{ security_policy }}"
+PROFILE_HEADING = "## Environment Profile\n"
 API_URL = "https://openrouter.ai/api/v1/chat/completions"
 ENV_FILE = REPO_ROOT / ".env"
 KEY_NAME = "OPENROUTER_API_KEY"
@@ -70,10 +73,30 @@ def load_prompt(path: Path = PROMPT_PATH) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
-def load_monitor_policy(monitor_dir: Path = MONITOR_DIR) -> str:
-    """The monitor's system prompt without its output format, as meltzer builds it."""
+def environment_lines(environment: str | None, trusted_hosts: tuple[str, ...]) -> str:
+    """The profile lines meltzer adds for `monitor.environment` and `monitor.trusted_hosts`."""
+    lines = []
+    if environment:
+        lines.append(f"- {environment.strip()}\n")
+    if len(trusted_hosts) == 1:
+        lines.append(f"- The host `{trusted_hosts[0]}` is a trusted internal service of the user's organization.\n")
+    elif trusted_hosts:
+        hosts = ", ".join(f"`{host}`" for host in trusted_hosts)
+        lines.append(f"- The hosts {hosts} are trusted internal services of the user's organization.\n")
+    return "".join(lines)
+
+
+def load_monitor_policy(
+    monitor_dir: Path = MONITOR_DIR,
+    environment: str | None = MONITOR_ENVIRONMENT,
+    trusted_hosts: tuple[str, ...] = MONITOR_TRUSTED_HOSTS,
+) -> str:
+    """The monitor's system prompt without its output format, as meltzer builds it for the bench's user config."""
     template = (monitor_dir / "policy_template.md").read_text(encoding="utf-8").rstrip()
     policy = (monitor_dir / "policy.md").read_text(encoding="utf-8").strip()
+    head, _, rest = policy.partition(PROFILE_HEADING)
+    first, _, others = rest.partition("\n")
+    policy = f"{head}{PROFILE_HEADING}{first}\n{environment_lines(environment, trusted_hosts)}{others}"
     return template.replace(SECURITY_POLICY_PLACEHOLDER, policy)
 
 
@@ -121,7 +144,7 @@ def build_messages(
 
 # --- transcript rendering (10.3) ------------------------------------------------------------------
 #
-# Session log format (meltzer/v0.1/src/meltzer/history.py, tools/plan.py, tools/compact.py,
+# Session log format (src/meltzer/history.py, tools/plan.py, tools/compact.py,
 # monitor/review.py): JSON lines.
 #   session_meta  {timestamp, id, cwd, started_at, parent_session_id?, config, config_sources, ...}
 #   item          {role, kind, content, name?, call_id?, arguments?, reasoning?, response_id?, created_at}
@@ -312,7 +335,7 @@ def ordered_rows(session_files: list[Path]) -> list[Row]:
             description = "main session"
         else:
             kind = "child"
-            description = "child session: a meltzer exec started by a shell command"
+            description = "child session: a meltzer exec started by a command of the agent"
         tag = f"S{si + 1} {kind}"
         previous = _parse_time(session.meta.get("started_at")) or datetime.min.replace(tzinfo=timezone.utc)
         for seq, rec in enumerate(session.records):

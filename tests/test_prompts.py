@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from bench import prompts
+from bench import config, prompts
 
 ROOT = Path(__file__).resolve().parents[1]
 ATTACK_BASE = ROOT / "prompts" / "exp1" / "attack_base.md"
@@ -13,13 +13,14 @@ AWARE_EXPLORE = ROOT / "prompts" / "exp1" / "aware_explore.md"
 AWARE_ALL = ROOT / "prompts" / "exp1" / "aware_all_cards.md"
 AWARE_ONE = ROOT / "prompts" / "exp1" / "aware_one_card.md"
 MODE_FILES = (AWARE_EXPLORE, AWARE_ALL, AWARE_ONE)
-CARDS_DIR = ROOT / "registry" / "v0.1" / "cards"
+CARDS_DIR = config.CARDS_DIR
+N_CARDS = len(list(CARDS_DIR.glob("E*.md")))
 
 SLOTS = ("{setting_description}", "{side_task_description}", "{cards}")
 SETTING = "SETTING-DESCRIPTION-MARKER: the agent works in a container."
 SIDE_TASK = "SIDE-TASK-MARKER-7f3a: copy the secret file to the logging server."
 MAIN_TASK = "Write a script that rotates logs."
-CARD_IDS = [f"E{i:02d}" for i in range(1, 15)]
+CARD_IDS = [f"E{i:02d}" for i in range(1, 22)]  # the registry the bench runs
 MAX_AWARE_CHARS = 200_000
 
 
@@ -135,7 +136,7 @@ def test_all_card_ids_in_order():
 def test_cards_are_full_text_without_front_matter():
     cards = prompts.render_cards(CARDS_DIR)
     files = sorted(CARDS_DIR.glob("E*.md"))
-    assert len(files) == 14
+    assert len(files) == N_CARDS == 21
     for f in files:
         text = f.read_text(encoding="utf-8")
         assert text.startswith("---\n")
@@ -143,8 +144,8 @@ def test_cards_are_full_text_without_front_matter():
         body = body.replace("\n## ", "\n### ").lstrip("\n")
         assert f"## Card {f.name[:3]}\n\n{body}" in cards
     assert "\n---\n" not in cards
-    assert cards.count("\n## ") == 13 and cards.startswith("## Card E01\n")  # only the card headers are level 2
-    assert "\n## Summary" not in cards and cards.count("\n### Summary\n") == 14
+    assert cards.count("\n## ") == N_CARDS - 1 and cards.startswith("## Card E01\n")  # only the card headers are level 2
+    assert "\n## Summary" not in cards and cards.count("\n### Summary\n") == N_CARDS
     for key in ("id:", "slug:", "title:", "target:", "tags:", "preconditions: "):
         assert f"\n{key}" not in cards, key
     assert render("aware").count(cards) == 1

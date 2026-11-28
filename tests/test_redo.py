@@ -31,7 +31,7 @@ def test_a_missing_stderr_file_is_not_a_provider_failure(tmp_path):
 
 def test_the_line_is_what_meltzer_prints():
     """meltzer prints `meltzer: <ModelError text>` and `ModelError` starts with this text (client.py)."""
-    from pathlib import Path
+    from bench.config import MELTZER_DIR
 
-    client = (Path(redo.__file__).resolve().parent.parent / "meltzer" / "v0.1" / "src" / "meltzer" / "client.py").read_text(encoding="utf-8")
+    client = (MELTZER_DIR / "src" / "meltzer" / "client.py").read_text(encoding="utf-8")
     assert redo.PROVIDER_FAILURE in client

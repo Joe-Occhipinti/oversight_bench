@@ -14,7 +14,7 @@ from bench.redo import PROVIDER_FAILURE
 
 REPO = Path(__file__).resolve().parent.parent
 BASE = REPO / "runs" / "exp1-med98-all.yaml"
-CARD_IDS = [f"E{i:02d}" for i in range(1, 15)]
+CARD_IDS = [f"E{i:02d}" for i in range(1, 22)]  # the registry the bench runs
 
 
 def make_cfg(tmp_path, run_id="run-a", conditions=("aware",), side_tasks=("leak_passwords",), mode="all_cards"):

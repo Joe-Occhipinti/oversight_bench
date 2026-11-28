@@ -26,7 +26,7 @@ from inspect_ai.util import ExecResult
 from bench import basharena
 from bench import solver as bench_solver
 from bench import task as bench_task
-from bench.config import REPO_ROOT, ConfigError, load_config
+from bench.config import MELTZER_DIR, REPO_ROOT, ConfigError, load_config
 
 PILOT = REPO_ROOT / "runs" / "exp1-pilot.yaml"
 DEVELOPER_TEXT = "DEVELOPER-TEXT-MARKER secret instructions"
@@ -399,7 +399,7 @@ def test_end_reason(kwargs, reason):
 
 def test_the_step_cap_message_is_meltzers():
     """The text that tells the step cap from a final answer is the one meltzer prints."""
-    source = (REPO_ROOT / "meltzer" / "v0.1" / "src" / "meltzer" / "session.py").read_text(encoding="utf-8")
+    source = (MELTZER_DIR / "src" / "meltzer" / "session.py").read_text(encoding="utf-8")
     assert f'f"{bench_solver.STEP_CAP_MESSAGE} (' in source
 
 
@@ -625,16 +625,16 @@ def one_card_cfg(cfg, n):
 def test_one_card_mode_assigns_a_card_to_every_aware_sample(cfg):
     from collections import Counter
 
-    ids = basharena.pool_ids()[:14]
-    one = one_card_cfg(cfg, 14)
+    ids = basharena.pool_ids()[:21]
+    one = one_card_cfg(cfg, 21)
     samples = bench_task.build_samples(one, ids, compose_paths(ids))
     for sample in samples:
         assert ("assigned_card" in sample.metadata) == (sample.metadata["condition"] == "aware")
     aware = [s for s in samples if s.metadata["condition"] == "aware"]
-    assert len(aware) == 14 * len(one.setting.side_tasks)
+    assert len(aware) == 21 * len(one.setting.side_tasks)
     for side in one.setting.side_tasks:
         counts = Counter(s.metadata["assigned_card"] for s in aware if s.metadata["side_task"] == side)
-        assert sorted(counts) == [f"E{i:02d}" for i in range(1, 15)] and set(counts.values()) == {1}
+        assert sorted(counts) == [f"E{i:02d}" for i in range(1, 22)] and set(counts.values()) == {1}
     row = bench_task.sample_row(eval_sample(metadata=dict(aware[0].metadata)))
     assert row["assigned_card"] == aware[0].metadata["assigned_card"]
 
@@ -655,8 +655,8 @@ def test_developer_instructions_follow_the_aware_mode(cfg):
 
     side = "download_malware"
     all_cards = bench_solver.render_developer_instructions(cfg, "aware", side)
-    assert "pick whichever you prefer" in all_cards and all_cards.count("\n## Card E") == 14
-    one = one_card_cfg(cfg, 14)
+    assert "pick whichever you prefer" in all_cards and all_cards.count("\n## Card E") == 21
+    one = one_card_cfg(cfg, 21)
     one_text = bench_solver.render_developer_instructions(one, "aware", side, "E04")
     assert one_text.count("\n## Card E") == 1 and "\n## Card E04\n" in one_text
     assert "you prefer" not in one_text and "Choose exactly one exploit" not in one_text

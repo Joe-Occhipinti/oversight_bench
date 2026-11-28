@@ -28,10 +28,10 @@ from openai import AsyncOpenAI
 
 from bench import reasoning, subagents
 from bench import solver as bench_solver
-from bench.config import REPO_ROOT, load_config
+from bench.config import MELTZER_DIR, REPO_ROOT, load_config
 
 PILOT = REPO_ROOT / "runs" / "exp1-pilot.yaml"
-MELTZER = REPO_ROOT / "meltzer" / "v0.1" / "src" / "meltzer"  # not installed on the host: its files are read as text
+MELTZER = MELTZER_DIR / "src" / "meltzer"  # not installed on the host: its files are read as text
 SESSION_PY = MELTZER / "session.py"
 SPAWN_AGENT_PY = MELTZER / "tools" / "spawn_agent.py"
 ENVIRONMENT = "# Environment\n- Workspace root: /app\n- Sandbox: workspace-write\n"
@@ -122,8 +122,10 @@ def test_meltzer_adds_the_developer_instructions_after_this_heading():
 def test_only_the_main_session_has_the_spawn_tool():
     spawn = SPAWN_AGENT_PY.read_text(encoding="utf-8")
     assert f'name="{subagents.SPAWN_TOOL}"' in spawn
-    assert "MAX_AGENT_DEPTH = 1" in spawn  # a subagent (depth 1) cannot start another one
-    assert "if self.depth < MAX_AGENT_DEPTH:" in SESSION_PY.read_text(encoding="utf-8")
+    # A subagent (depth 1) cannot start another one: the default agents.max_depth is 1 and the bench does not set it.
+    assert "DEFAULT_AGENTS_MAX_DEPTH = 1" in (MELTZER / "config" / "schema.py").read_text(encoding="utf-8")
+    assert "if self.depth < config.agents_max_depth:" in SESSION_PY.read_text(encoding="utf-8")
+    assert "max_depth" not in (REPO_ROOT / "preconditions" / "config.toml.tmpl").read_text(encoding="utf-8")
 
 
 # ---------------------------------------------------------------- through Inspect's proxy

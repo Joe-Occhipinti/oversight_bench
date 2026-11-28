@@ -11,6 +11,7 @@ import pytest
 
 from bench import judge as J
 from bench import prompts
+from bench.config import CARDS_DIR
 
 FIXTURES = Path(__file__).parent / "fixtures" / "judge"
 SESSIONS = FIXTURES / "sessions" / "2026" / "10" / "31"
@@ -18,7 +19,8 @@ MAIN_FILE = next(SESSIONS.glob("session-*-5f0c8a1e-*.jsonl"))
 SUB_FILE = next(SESSIONS.glob("session-*-b21d7e90-*.jsonl"))
 CUT_MARK = re.compile(r"\[\.\.\. \d+ characters cut \.\.\.\]")
 
-IDS = [f"E{i:02d}" for i in range(1, 15)]
+IDS = [f"E{i:02d}" for i in range(1, 15)]  # the fixture registry
+REAL_IDS = [f"E{i:02d}" for i in range(1, 22)]  # registry of the meltzer version the bench runs
 
 
 def out(**kw) -> str:
@@ -384,7 +386,7 @@ def test_transcript_interleaves_sessions_by_time(tmp_path):
     # the child session start says how it was started; the subagent's names its parent session
     child_start = entry_with(t, "id: child1")
     assert "S2 child SESSION START" in child_start
-    assert "child session: a meltzer exec started by a shell command" in child_start
+    assert "child session: a meltzer exec started by a command of the agent" in child_start
     assert "spawn_agent" not in child_start
     assert "subagent session, started by spawn_agent in S1" in entry_with(t, "id: sub1")
 
@@ -469,11 +471,11 @@ def test_load_cards_follow_the_folder(tmp_path):
 
 
 def test_load_cards_real_registry():
-    d = Path(__file__).parent.parent / "registry" / "v0.1" / "cards"
+    d = CARDS_DIR
     if not d.is_dir():
         pytest.skip("registry not present")
     cards = J.load_cards(d)
-    assert [cid for cid, _ in cards] == IDS
+    assert [cid for cid, _ in cards] == REAL_IDS
     assert J.cards_block(cards) == prompts.render_cards(d)  # the judge reads the cards as the agent does
 
 
@@ -512,9 +514,19 @@ def test_build_messages_inserts_values_once(tmp_path):
 
 
 def test_monitor_policy_is_the_monitor_system_prompt():
+    """The judge's copy is meltzer's own system prompt for the bench's user config, without the output contract."""
+    import sys
+
+    src = str(J.MONITOR_DIR.parent.parent)
+    if src not in sys.path:
+        sys.path.insert(0, src)
+    from meltzer.monitor.prompt import OUTPUT_CONTRACT, policy_prompt
+
     text = J.load_monitor_policy()
-    policy = (J.MONITOR_DIR / "policy.md").read_text(encoding="utf-8").strip()
-    assert policy in text and J.SECURITY_POLICY_PLACEHOLDER not in text
+    expected = policy_prompt(J.MONITOR_ENVIRONMENT, J.MONITOR_TRUSTED_HOSTS)
+    assert expected == f"{text}\n\n{OUTPUT_CONTRACT}\n"
+    assert J.SECURITY_POLICY_PLACEHOLDER not in text
+    assert f"- {J.MONITOR_ENVIRONMENT}\n" in text and "`192.0.2.10` is a trusted internal service" in text
     assert text.startswith("You are judging one planned coding-agent action.")
 
 

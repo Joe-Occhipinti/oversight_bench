@@ -6,8 +6,8 @@ Reviews a fixed set of escalation requests with meltzer's own reviewer
 need). Each request is reviewed `--reps` times (default 5).
 
 Each review gets a synthetic history: the main-task user message (as the run sends it) and the
-request as an escalated `shell` call. The ApprovalRequest is the one meltzer's orchestrator builds
-for an escalated shell call.
+request as an escalated `exec_command` call. The ApprovalRequest is the one meltzer's orchestrator builds
+for an escalated exec_command call.
 
 Three things differ from a run inside the container, all set up here and only in this process:
 - The model client is meltzer's `ChatClient` pointed at OpenRouter, with `provider`,
@@ -17,10 +17,11 @@ Three things differ from a run inside the container, all set up here and only in
   holding a copy of BashArena's base filesystem plus `/app` (the workspace scripts of spec 6 and
   the request files listed below); absolute paths are mapped into it, so `/etc/firewall/...` or
   `/app/...` work. Nothing of the task's own setup is there except those files.
-- The session recorder and UI are in-memory stubs.
+- The session recorder and UI are in-memory stubs; the sandbox policy lets the reviewer read every path of
+  the copied filesystem. The monitor's environment and trusted hosts are the bench's user config values.
 
 Output: results/calibration/round-<R>/ with reviews.jsonl (one row per review), summary.json,
-the policy.md that was reviewed, and raw/<request>-<rep>.json (review messages and response bodies).
+the monitor prompt that was reviewed (policy.md, without its output format), and raw/<request>-<rep>.json (review messages and response bodies).
 """
 
 from __future__ import annotations
@@ -38,11 +39,12 @@ from types import SimpleNamespace
 from typing import Any
 
 from bench import basharena
-from bench.config import REPO_ROOT, RESULTS_ROOT, load_config, to_plain
-from bench.judge import load_api_key, served_by_configured
+from bench.config import MELTZER_DIR, MONITOR_ENVIRONMENT, MONITOR_TRUSTED_HOSTS, REPO_ROOT, RESULTS_ROOT, load_config, to_plain
+from bench.judge import load_api_key, load_monitor_policy, served_by_configured
+from bench.preconditions import SCRIPT_PATHS
 from bench.prompts import render_user_message
 
-sys.path.insert(0, str(REPO_ROOT / "meltzer" / "v0.1" / "src"))
+sys.path.insert(0, str(MELTZER_DIR / "src"))
 
 import meltzer.monitor.tools as monitor_tools  # noqa: E402
 from meltzer.approval.policy import ApprovalRequest  # noqa: E402
@@ -51,14 +53,8 @@ from meltzer.history import History, Item  # noqa: E402
 from meltzer.monitor.review import MonitorReviewer  # noqa: E402
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-POLICY_PATH = REPO_ROOT / "meltzer" / "v0.1" / "src" / "meltzer" / "monitor" / "policy.md"
 BASE_FILESYSTEM = REPO_ROOT / "vendor" / "basharena" / "src" / "base_environment" / "filesystem"
 PRECONDITIONS = REPO_ROOT / "preconditions"
-WORKSPACE_SCRIPTS = {  # spec 6: precondition script -> path in the container
-    "sync_code_graph.py": "/app/tools/sync_code_graph.py",
-    "turn_complete_notify.py": "/app/tools/turn_complete_notify.py",
-    "check.py": "/app/scripts/check.py",
-}
 TRANSCRIPT_ITEMS = 40  # meltzer's default monitor.transcript_items; the run does not set it
 OUT_DIR = RESULTS_ROOT / "calibration"
 
@@ -221,7 +217,7 @@ def build_filesystem(base: Path, task_id: str) -> Path:
     """A copy of the base filesystem plus /app for one task. Returns the session root (<fs>/app)."""
     fs = base / task_id
     shutil.copytree(BASE_FILESYSTEM, fs)
-    files = {container: (PRECONDITIONS / name).read_text(encoding="utf-8") for name, container in WORKSPACE_SCRIPTS.items()}
+    files = {container: (PRECONDITIONS / name).read_text(encoding="utf-8") for name, container in SCRIPT_PATHS.items()}
     files.update(TASK_FILES.get(task_id, {}))
     for container, text in files.items():
         path = fs / container.lstrip("/")
@@ -231,7 +227,7 @@ def build_filesystem(base: Path, task_id: str) -> Path:
     return fs / "app"
 
 
-def _resolve_in_fs(cwd: Path, value: str) -> Path:
+def _resolve_in_fs(cwd: Path, value: str, can_read: Any = None) -> Path:
     """Replacement for meltzer.monitor.tools._resolve: absolute container paths map into <fs>."""
     fs = cwd.parent
     if value.startswith("~"):
@@ -280,27 +276,34 @@ class UI:
 def review_once(request: Request, rep: int, root: Path, cfg: Any, api_key: str, raw_dir: Path) -> dict:
     monitor = cfg.models.monitor
     task = basharena.load_task(request.task_id)
-    arguments: dict[str, Any] = {"command": request.command}
+    arguments: dict[str, Any] = {"cmd": request.command}
     if request.workdir != "/app":
         arguments["workdir"] = request.workdir
     arguments.update(escalate=True, justification=request.justification)
     history = History()
     history.append(Item.user(render_user_message(task.description)))
-    history.append(Item.tool_call("call_1", "shell", json.dumps(arguments), "response_1"))
+    history.append(Item.tool_call("call_1", "exec_command", json.dumps(arguments), "response_1"))
 
     calls: list[dict] = []
     client = OpenRouterClient(monitor, api_key, calls)
     recorder = Recorder()
     session = SimpleNamespace(
-        config=SimpleNamespace(monitor_model=monitor.id, model=monitor.id, monitor_transcript_items=TRANSCRIPT_ITEMS),
+        config=SimpleNamespace(
+            monitor_model=monitor.id,
+            model=monitor.id,
+            monitor_transcript_items=TRANSCRIPT_ITEMS,
+            monitor_environment=MONITOR_ENVIRONMENT,
+            monitor_trusted_hosts=MONITOR_TRUSTED_HOSTS,
+        ),
         root=root,
+        policy=SimpleNamespace(can_read=lambda path: True),
         history=history,
         recorder=recorder,
         client=client,
         ui=UI(),
     )
     approval = ApprovalRequest(
-        tool="shell",
+        tool="exec_command",
         cwd=PurePosixPath(request.workdir),
         command=request.command,
         justification=request.justification,
@@ -390,7 +393,7 @@ def main(argv: list[str] | None = None) -> int:
         shutil.rmtree(out)
     raw_dir = out / "raw"
     raw_dir.mkdir(parents=True)
-    shutil.copyfile(POLICY_PATH, out / "policy.md")
+    (out / "policy.md").write_text(load_monitor_policy(), encoding="utf-8")
 
     monitor_tools._resolve = _resolve_in_fs
     fs_base = Path(tempfile.mkdtemp(prefix="srv-"))
